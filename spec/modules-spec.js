@@ -1,9 +1,16 @@
-const assert = require('assert')
+const chai = require('chai')
+const dirtyChai = require('dirty-chai')
+
 const Module = require('module')
 const path = require('path')
-const {remote} = require('electron')
-const {BrowserWindow} = remote
-const {closeWindow} = require('./window-helpers')
+const fs = require('fs')
+const { remote } = require('electron')
+const { BrowserWindow } = remote
+const { closeWindow } = require('./window-helpers')
+const features = process.electronBinding('features')
+
+const { expect } = chai
+chai.use(dirtyChai)
 
 const nativeModulesEnabled = remote.getGlobal('nativeModulesEnabled')
 
@@ -11,41 +18,40 @@ describe('modules support', () => {
   const fixtures = path.join(__dirname, 'fixtures')
 
   describe('third-party module', () => {
-    describe('runas', () => {
-      if (!nativeModulesEnabled) return
-
+    (nativeModulesEnabled ? describe : describe.skip)('echo', () => {
       it('can be required in renderer', () => {
-        require('runas')
+        require('echo')
       })
 
-      it('can be required in node binary', (done) => {
-        const runas = path.join(fixtures, 'module', 'runas.js')
-        const child = require('child_process').fork(runas)
+      it('can be required in node binary', function (done) {
+        if (!features.isRunAsNodeEnabled()) {
+          this.skip()
+          done()
+        }
+
+        const echo = path.join(fixtures, 'module', 'echo.js')
+        const child = require('child_process').fork(echo)
         child.on('message', (msg) => {
-          assert.equal(msg, 'ok')
+          expect(msg).to.equal('ok')
           done()
         })
       })
-    })
 
-    // TODO(alexeykuzmin): Disabled during the Chromium 62 (Node.js 9) upgrade.
-    // Enable it back when "ffi" module supports Node.js 9.
-    // https://github.com/electron/electron/issues/11274
-    xdescribe('ffi', () => {
-      before(function () {
-        if (!nativeModulesEnabled || process.platform === 'win32' ||
-            process.arch === 'arm64') {
-          this.skip()
-        }
-      })
-
-      it('does not crash', () => {
-        const ffi = require('ffi')
-        const libm = ffi.Library('libm', {
-          ceil: ['double', ['double']]
+      if (process.platform === 'win32') {
+        it('can be required if electron.exe is renamed', () => {
+          const { execPath } = remote.process
+          const testExecPath = path.join(path.dirname(execPath), 'test.exe')
+          fs.copyFileSync(execPath, testExecPath)
+          try {
+            const fixture = path.join(fixtures, 'module', 'echo-renamed.js')
+            expect(fs.existsSync(fixture)).to.be.true()
+            const child = require('child_process').spawnSync(testExecPath, [fixture])
+            expect(child.status).to.equal(0)
+          } finally {
+            fs.unlinkSync(testExecPath)
+          }
         })
-        assert.equal(libm.ceil(1.5), 2)
-      })
+      }
     })
 
     describe('q', () => {
@@ -53,19 +59,19 @@ describe('modules support', () => {
       describe('Q.when', () => {
         it('emits the fullfil callback', (done) => {
           Q(true).then((val) => {
-            assert.equal(val, true)
+            expect(val).to.be.true()
             done()
           })
         })
       })
     })
 
-    describe('coffee-script', () => {
+    describe('coffeescript', () => {
       it('can be registered and used to require .coffee files', () => {
-        assert.doesNotThrow(() => {
-          require('coffee-script').register()
-        })
-        assert.strictEqual(require('./fixtures/module/test.coffee'), true)
+        expect(() => {
+          require('coffeescript').register()
+        }).to.not.throw()
+        expect(require('./fixtures/module/test.coffee')).to.be.true()
       })
     })
   })
@@ -73,19 +79,19 @@ describe('modules support', () => {
   describe('global variables', () => {
     describe('process', () => {
       it('can be declared in a module', () => {
-        assert.strictEqual(require('./fixtures/module/declare-process'), 'declared process')
+        expect(require('./fixtures/module/declare-process')).to.equal('declared process')
       })
     })
 
     describe('global', () => {
       it('can be declared in a module', () => {
-        assert.strictEqual(require('./fixtures/module/declare-global'), 'declared global')
+        expect(require('./fixtures/module/declare-global')).to.equal('declared global')
       })
     })
 
     describe('Buffer', () => {
       it('can be declared in a module', () => {
-        assert.strictEqual(require('./fixtures/module/declare-buffer'), 'declared Buffer')
+        expect(require('./fixtures/module/declare-buffer')).to.equal('declared Buffer')
       })
     })
   })
@@ -94,36 +100,36 @@ describe('modules support', () => {
     describe('when the path is inside the resources path', () => {
       it('does not include paths outside of the resources path', () => {
         let modulePath = process.resourcesPath
-        assert.deepEqual(Module._nodeModulePaths(modulePath), [
+        expect(Module._nodeModulePaths(modulePath)).to.deep.equal([
           path.join(process.resourcesPath, 'node_modules')
         ])
 
         modulePath = process.resourcesPath + '-foo'
         const nodeModulePaths = Module._nodeModulePaths(modulePath)
-        assert(nodeModulePaths.includes(path.join(modulePath, 'node_modules')))
-        assert(nodeModulePaths.includes(path.join(modulePath, '..', 'node_modules')))
+        expect(nodeModulePaths).to.include(path.join(modulePath, 'node_modules'))
+        expect(nodeModulePaths).to.include(path.join(modulePath, '..', 'node_modules'))
 
         modulePath = path.join(process.resourcesPath, 'foo')
-        assert.deepEqual(Module._nodeModulePaths(modulePath), [
+        expect(Module._nodeModulePaths(modulePath)).to.deep.equal([
           path.join(process.resourcesPath, 'foo', 'node_modules'),
           path.join(process.resourcesPath, 'node_modules')
         ])
 
         modulePath = path.join(process.resourcesPath, 'node_modules', 'foo')
-        assert.deepEqual(Module._nodeModulePaths(modulePath), [
+        expect(Module._nodeModulePaths(modulePath)).to.deep.equal([
           path.join(process.resourcesPath, 'node_modules', 'foo', 'node_modules'),
           path.join(process.resourcesPath, 'node_modules')
         ])
 
         modulePath = path.join(process.resourcesPath, 'node_modules', 'foo', 'bar')
-        assert.deepEqual(Module._nodeModulePaths(modulePath), [
+        expect(Module._nodeModulePaths(modulePath)).to.deep.equal([
           path.join(process.resourcesPath, 'node_modules', 'foo', 'bar', 'node_modules'),
           path.join(process.resourcesPath, 'node_modules', 'foo', 'node_modules'),
           path.join(process.resourcesPath, 'node_modules')
         ])
 
         modulePath = path.join(process.resourcesPath, 'node_modules', 'foo', 'node_modules', 'bar')
-        assert.deepEqual(Module._nodeModulePaths(modulePath), [
+        expect(Module._nodeModulePaths(modulePath)).to.deep.equal([
           path.join(process.resourcesPath, 'node_modules', 'foo', 'node_modules', 'bar', 'node_modules'),
           path.join(process.resourcesPath, 'node_modules', 'foo', 'node_modules'),
           path.join(process.resourcesPath, 'node_modules')
@@ -133,8 +139,8 @@ describe('modules support', () => {
 
     describe('when the path is outside the resources path', () => {
       it('includes paths outside of the resources path', () => {
-        let modulePath = path.resolve('/foo')
-        assert.deepEqual(Module._nodeModulePaths(modulePath), [
+        const modulePath = path.resolve('/foo')
+        expect(Module._nodeModulePaths(modulePath)).to.deep.equal([
           path.join(modulePath, 'node_modules'),
           path.resolve('/node_modules')
         ])
@@ -147,7 +153,12 @@ describe('modules support', () => {
       let w
 
       beforeEach(() => {
-        w = new BrowserWindow({show: false})
+        w = new BrowserWindow({
+          show: false,
+          webPreferences: {
+            nodeIntegration: true
+          }
+        })
       })
 
       afterEach(async () => {
@@ -158,7 +169,7 @@ describe('modules support', () => {
       it('searches for module under app directory', async () => {
         w.loadURL('about:blank')
         const result = await w.webContents.executeJavaScript('typeof require("q").when')
-        assert.equal(result, 'function')
+        expect(result).to.equal('function')
       })
     })
   })

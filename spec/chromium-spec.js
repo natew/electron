@@ -1,15 +1,21 @@
-const assert = require('assert')
+const chai = require('chai')
+const dirtyChai = require('dirty-chai')
 const fs = require('fs')
 const http = require('http')
 const path = require('path')
 const ws = require('ws')
 const url = require('url')
 const ChildProcess = require('child_process')
-const {ipcRenderer, remote} = require('electron')
-const {closeWindow} = require('./window-helpers')
-const {app, BrowserWindow, ipcMain, protocol, session, webContents} = remote
+const { ipcRenderer, remote } = require('electron')
+const { emittedOnce } = require('./events-helpers')
+const { closeWindow, waitForWebContentsToLoad } = require('./window-helpers')
+const { resolveGetters } = require('./expect-helpers')
+const { app, BrowserWindow, ipcMain, protocol, session, webContents } = remote
 const isCI = remote.getGlobal('isCi')
-const features = process.atomBinding('features')
+const features = process.electronBinding('features')
+
+const { expect } = chai
+chai.use(dirtyChai)
 
 /* Most of the APIs here don't use standard callbacks */
 /* eslint-disable standard/no-callback-literal */
@@ -26,6 +32,11 @@ describe('chromium feature', () => {
     listener = null
   })
 
+  afterEach(async () => {
+    await closeWindow(w)
+    w = null
+  })
+
   describe('command line switches', () => {
     describe('--lang switch', () => {
       const currentLocale = app.getLocale()
@@ -33,12 +44,12 @@ describe('chromium feature', () => {
         const appPath = path.join(__dirname, 'fixtures', 'api', 'locale-check')
         const electronPath = remote.getGlobal('process').execPath
         let output = ''
-        let appProcess = ChildProcess.spawn(electronPath, [appPath, `--lang=${locale}`])
+        const appProcess = ChildProcess.spawn(electronPath, [appPath, `--lang=${locale}`])
 
         appProcess.stdout.on('data', (data) => { output += data })
         appProcess.stdout.on('end', () => {
           output = output.replace(/(\r\n|\n|\r)/gm, '')
-          assert.equal(output, result)
+          expect(output).to.equal(result)
           done()
         })
       }
@@ -46,50 +57,53 @@ describe('chromium feature', () => {
       it('should set the locale', (done) => testLocale('fr', 'fr', done))
       it('should not set an invalid locale', (done) => testLocale('asdfkl', currentLocale, done))
     })
-  })
 
-  afterEach(() => closeWindow(w).then(() => { w = null }))
+    describe('--remote-debugging-port switch', () => {
+      it('should display the discovery page', (done) => {
+        const electronPath = remote.getGlobal('process').execPath
+        let output = ''
+        const appProcess = ChildProcess.spawn(electronPath, [`--remote-debugging-port=`])
 
-  describe('heap snapshot', () => {
-    it('does not crash', function () {
-      process.atomBinding('v8_util').takeHeapSnapshot()
+        appProcess.stderr.on('data', (data) => {
+          output += data
+          const m = /DevTools listening on ws:\/\/127.0.0.1:(\d+)\//.exec(output)
+          if (m) {
+            appProcess.stderr.removeAllListeners('data')
+            const port = m[1]
+            http.get(`http://127.0.0.1:${port}`, (res) => {
+              res.destroy()
+              appProcess.kill()
+              expect(res.statusCode).to.eql(200)
+              expect(parseInt(res.headers['content-length'])).to.be.greaterThan(0)
+              done()
+            })
+          }
+        })
+      })
     })
   })
 
-  describe('sending request of http protocol urls', () => {
-    it('does not crash', (done) => {
-      const server = http.createServer((req, res) => {
-        res.end()
-        server.close()
-        done()
-      })
-      server.listen(0, '127.0.0.1', () => {
-        const port = server.address().port
-        $.get(`http://127.0.0.1:${port}`)
-      })
+  describe('heap snapshot', () => {
+    it('does not crash', function () {
+      process.electronBinding('v8_util').takeHeapSnapshot()
     })
   })
 
   describe('accessing key names also used as Node.js module names', () => {
     it('does not crash', (done) => {
-      w = new BrowserWindow({show: false})
+      w = new BrowserWindow({ show: false })
       w.webContents.once('did-finish-load', () => { done() })
       w.webContents.once('crashed', () => done(new Error('WebContents crashed.')))
-      w.loadURL(`file://${fixtures}/pages/external-string.html`)
+      w.loadFile(path.join(fixtures, 'pages', 'external-string.html'))
     })
   })
 
   describe('loading jquery', () => {
     it('does not crash', (done) => {
-      w = new BrowserWindow({
-        show: false,
-        webPreferences: {
-          nodeIntegration: false
-        }
-      })
+      w = new BrowserWindow({ show: false })
       w.webContents.once('did-finish-load', () => { done() })
       w.webContents.once('crashed', () => done(new Error('WebContents crashed.')))
-      w.loadURL(`file://${fixtures}/pages/jquery.html`)
+      w.loadFile(path.join(fixtures, 'pages', 'jquery.html'))
     })
   })
 
@@ -99,12 +113,16 @@ describe('chromium feature', () => {
         audio: true,
         video: false
       }, () => done(),
-         () => done())
+      () => done())
     })
   })
 
   describe('navigator.mediaDevices', () => {
     if (isCI) return
+
+    afterEach(() => {
+      remote.getGlobal('permissionChecks').allow()
+    })
 
     it('can return labels of enumerated devices', (done) => {
       navigator.mediaDevices.enumerateDevices().then((devices) => {
@@ -114,6 +132,19 @@ describe('chromium feature', () => {
           done()
         } else {
           done(new Error(`No device labels found: ${JSON.stringify(labels)}`))
+        }
+      }).catch(done)
+    })
+
+    it('does not return labels of enumerated devices when permission denied', (done) => {
+      remote.getGlobal('permissionChecks').reject()
+      navigator.mediaDevices.enumerateDevices().then((devices) => {
+        const labels = devices.map((device) => device.label)
+        const labelFound = labels.some((label) => !!label)
+        if (labelFound) {
+          done(new Error(`Device labels were found: ${JSON.stringify(labels)}`))
+        } else {
+          done()
         }
       }).catch(done)
     })
@@ -128,38 +159,38 @@ describe('chromium feature', () => {
       w = new BrowserWindow({
         show: false,
         webPreferences: {
+          nodeIntegration: true,
           session: ses
         }
       })
-      w.webContents.on('ipc-message', (event, args) => {
-        if (args[0] === 'deviceIds') deviceIds.push(args[1])
+      w.webContents.on('ipc-message', (event, channel, deviceId) => {
+        if (channel === 'deviceIds') deviceIds.push(deviceId)
         if (deviceIds.length === 2) {
-          assert.notDeepEqual(deviceIds[0], deviceIds[1])
+          expect(deviceIds[0]).to.not.deep.equal(deviceIds[1])
           closeWindow(w).then(() => {
             w = null
             done()
           }).catch((error) => done(error))
         } else {
-          ses.clearStorageData(options, () => {
+          ses.clearStorageData(options).then(() => {
             w.webContents.reload()
           })
         }
       })
-      w.loadURL(`file://${fixtures}/pages/media-id-reset.html`)
+      w.loadFile(path.join(fixtures, 'pages', 'media-id-reset.html'))
     })
   })
 
   describe('navigator.language', () => {
     it('should not be empty', () => {
-      assert.notEqual(navigator.language, '')
+      expect(navigator.language).to.not.equal('')
     })
   })
 
   describe('navigator.languages', (done) => {
     it('should return the system locale only', () => {
-      let appLocale = app.getLocale()
-      assert.equal(navigator.languages.length, 1)
-      assert.equal(navigator.languages[0], appLocale)
+      const appLocale = app.getLocale()
+      expect(navigator.languages).to.deep.equal([appLocale])
     })
   })
 
@@ -168,23 +199,24 @@ describe('chromium feature', () => {
       w = new BrowserWindow({
         show: false,
         webPreferences: {
+          nodeIntegration: true,
           partition: 'sw-file-scheme-spec'
         }
       })
-      w.webContents.on('ipc-message', (event, args) => {
-        if (args[0] === 'reload') {
+      w.webContents.on('ipc-message', (event, channel, message) => {
+        if (channel === 'reload') {
           w.webContents.reload()
-        } else if (args[0] === 'error') {
-          done(args[1])
-        } else if (args[0] === 'response') {
-          assert.equal(args[1], 'Hello from serviceWorker!')
+        } else if (channel === 'error') {
+          done(message)
+        } else if (channel === 'response') {
+          expect(message).to.equal('Hello from serviceWorker!')
           session.fromPartition('sw-file-scheme-spec').clearStorageData({
             storages: ['serviceworkers']
-          }, () => done())
+          }).then(() => done())
         }
       })
       w.webContents.on('crashed', () => done(new Error('WebContents crashed.')))
-      w.loadURL(`file://${fixtures}/pages/service-worker/index.html`)
+      w.loadFile(path.join(fixtures, 'pages', 'service-worker', 'index.html'))
     })
 
     it('should register for intercepted file scheme', (done) => {
@@ -198,46 +230,92 @@ describe('chromium feature', () => {
         let type = 'text/html'
 
         if (ext === '.js') type = 'application/javascript'
-        callback({data: content, mimeType: type})
+        callback({ data: content, mimeType: type })
       }, (error) => {
         if (error) done(error)
       })
 
       w = new BrowserWindow({
         show: false,
-        webPreferences: { session: customSession }
+        webPreferences: {
+          nodeIntegration: true,
+          session: customSession
+        }
       })
-      w.webContents.on('ipc-message', (event, args) => {
-        if (args[0] === 'reload') {
+      w.webContents.on('ipc-message', (event, channel, message) => {
+        if (channel === 'reload') {
           w.webContents.reload()
-        } else if (args[0] === 'error') {
-          done(`unexpected error : ${args[1]}`)
-        } else if (args[0] === 'response') {
-          assert.equal(args[1], 'Hello from serviceWorker!')
+        } else if (channel === 'error') {
+          done(`unexpected error : ${message}`)
+        } else if (channel === 'response') {
+          expect(message).to.equal('Hello from serviceWorker!')
           customSession.clearStorageData({
             storages: ['serviceworkers']
-          }, () => {
-            customSession.protocol.uninterceptProtocol('file', (error) => done(error))
+          }).then(() => {
+            customSession.protocol.uninterceptProtocol('file', error => done(error))
           })
         }
       })
       w.webContents.on('crashed', () => done(new Error('WebContents crashed.')))
-      w.loadURL(`file://${fixtures}/pages/service-worker/index.html`)
+      w.loadFile(path.join(fixtures, 'pages', 'service-worker', 'index.html'))
+    })
+  })
+
+  describe('navigator.geolocation', () => {
+    before(function () {
+      if (!features.isFakeLocationProviderEnabled()) {
+        return this.skip()
+      }
+    })
+
+    it('returns position when permission is granted', (done) => {
+      navigator.geolocation.getCurrentPosition((position) => {
+        expect(position).to.have.a.property('coords')
+        expect(position).to.have.a.property('timestamp')
+        done()
+      }, (error) => {
+        done(error)
+      })
+    })
+
+    it('returns error when permission is denied', (done) => {
+      w = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          nodeIntegration: true,
+          partition: 'geolocation-spec'
+        }
+      })
+      w.webContents.on('ipc-message', (event, channel) => {
+        if (channel === 'success') {
+          done()
+        } else {
+          done('unexpected response from geolocation api')
+        }
+      })
+      w.webContents.session.setPermissionRequestHandler((wc, permission, callback) => {
+        if (permission === 'geolocation') {
+          callback(false)
+        } else {
+          callback(true)
+        }
+      })
+      w.loadFile(path.join(fixtures, 'pages', 'geolocation', 'index.html'))
     })
   })
 
   describe('window.open', () => {
     it('returns a BrowserWindowProxy object', () => {
       const b = window.open('about:blank', '', 'show=no')
-      assert.equal(b.closed, false)
-      assert.equal(b.constructor.name, 'BrowserWindowProxy')
+      expect(b.closed).to.be.false()
+      expect(b.constructor.name).to.equal('BrowserWindowProxy')
       b.close()
     })
 
     it('accepts "nodeIntegration" as feature', (done) => {
-      let b
+      let b = null
       listener = (event) => {
-        assert.equal(event.data.isProcessGlobalUndefined, true)
+        expect(event.data.isProcessGlobalUndefined).to.be.true()
         b.close()
         done()
       }
@@ -246,12 +324,12 @@ describe('chromium feature', () => {
     })
 
     it('inherit options of parent window', (done) => {
-      let b
+      let b = null
       listener = (event) => {
         const ref1 = remote.getCurrentWindow().getSize()
         const width = ref1[0]
         const height = ref1[1]
-        assert.equal(event.data, `size: ${width} ${height}`)
+        expect(event.data).to.equal(`size: ${width} ${height}`)
         b.close()
         done()
       }
@@ -261,7 +339,7 @@ describe('chromium feature', () => {
 
     for (const show of [true, false]) {
       it(`inherits parent visibility over parent {show=${show}} option`, (done) => {
-        const w = new BrowserWindow({show})
+        const w = new BrowserWindow({ show })
 
         // toggle visibility
         if (show) {
@@ -271,18 +349,18 @@ describe('chromium feature', () => {
         }
 
         w.webContents.once('new-window', (e, url, frameName, disposition, options) => {
-          assert.equal(options.show, w.isVisible())
+          expect(options.show).to.equal(w.isVisible())
           w.close()
           done()
         })
-        w.loadURL(`file://${fixtures}/pages/window-open.html`)
+        w.loadFile(path.join(fixtures, 'pages', 'window-open.html'))
       })
     }
 
     it('disables node integration when it is disabled on the parent window', (done) => {
-      let b
+      let b = null
       listener = (event) => {
-        assert.equal(event.data.isProcessGlobalUndefined, true)
+        expect(event.data.isProcessGlobalUndefined).to.be.true()
         b.close()
         done()
       }
@@ -300,55 +378,34 @@ describe('chromium feature', () => {
     })
 
     // TODO(codebytere): re-enable this test
-    xit('disables webviewTag when node integration is disabled on the parent window', (done) => {
-      let b
-      listener = (event) => {
-        assert.equal(event.data.isWebViewUndefined, true)
-        b.close()
-        done()
-      }
-      window.addEventListener('message', listener)
-
-      const windowUrl = require('url').format({
-        pathname: `${fixtures}/pages/window-opener-no-web-view-tag.html`,
-        protocol: 'file',
-        query: {
-          p: `${fixtures}/pages/window-opener-web-view.html`
-        },
-        slashes: true
-      })
-      b = window.open(windowUrl, '', 'nodeIntegration=no,show=no')
-    })
-
-    // TODO(codebytere): re-enable this test
     xit('disables node integration when it is disabled on the parent window for chrome devtools URLs', (done) => {
-      let b
+      let b = null
       app.once('web-contents-created', (event, contents) => {
         contents.once('did-finish-load', () => {
           contents.executeJavaScript('typeof process').then((typeofProcessGlobal) => {
-            assert.equal(typeofProcessGlobal, 'undefined')
+            expect(typeofProcessGlobal).to.equal('undefined')
             b.close()
             done()
           }).catch(done)
         })
       })
-      b = window.open('chrome-devtools://devtools/bundled/inspector.html', '', 'nodeIntegration=no,show=no')
+      b = window.open('devtools://devtools/bundled/inspector.html', '', 'nodeIntegration=no,show=no')
     })
 
     it('disables JavaScript when it is disabled on the parent window', (done) => {
-      let b
+      let b = null
       app.once('web-contents-created', (event, contents) => {
         contents.once('did-finish-load', () => {
           app.once('browser-window-created', (event, window) => {
             const preferences = window.webContents.getLastWebPreferences()
-            assert.equal(preferences.javascript, false)
+            expect(preferences.javascript).to.be.false()
             window.destroy()
             b.close()
             done()
           })
           // Click link on page
-          contents.sendInputEvent({type: 'mouseDown', clickCount: 1, x: 1, y: 1})
-          contents.sendInputEvent({type: 'mouseUp', clickCount: 1, x: 1, y: 1})
+          contents.sendInputEvent({ type: 'mouseDown', clickCount: 1, x: 1, y: 1 })
+          contents.sendInputEvent({ type: 'mouseUp', clickCount: 1, x: 1, y: 1 })
         })
       })
 
@@ -361,9 +418,9 @@ describe('chromium feature', () => {
     })
 
     it('disables the <webview> tag when it is disabled on the parent window', (done) => {
-      let b
+      let b = null
       listener = (event) => {
-        assert.equal(event.data.isWebViewGlobalUndefined, true)
+        expect(event.data.isWebViewGlobalUndefined).to.be.true()
         b.close()
         done()
       }
@@ -381,13 +438,13 @@ describe('chromium feature', () => {
     })
 
     it('does not override child options', (done) => {
-      let b
+      let b = null
       const size = {
         width: 350,
         height: 450
       }
       listener = (event) => {
-        assert.equal(event.data, `size: ${size.width} ${size.height}`)
+        expect(event.data).to.equal(`size: ${size.width} ${size.height}`)
         b.close()
         done()
       }
@@ -397,11 +454,11 @@ describe('chromium feature', () => {
 
     it('handles cycles when merging the parent options into the child options', (done) => {
       w = BrowserWindow.fromId(ipcRenderer.sendSync('create-window-with-options-cycle'))
-      w.loadURL(`file://${fixtures}/pages/window-open.html`)
+      w.loadFile(path.join(fixtures, 'pages', 'window-open.html'))
       w.webContents.once('new-window', (event, url, frameName, disposition, options) => {
-        assert.equal(options.show, false)
-        assert.deepEqual(options.foo, {
-          bar: null,
+        expect(options.show).to.be.false()
+        expect(...resolveGetters(options.foo)).to.deep.equal({
+          bar: undefined,
           baz: {
             hello: {
               world: true
@@ -418,7 +475,7 @@ describe('chromium feature', () => {
     })
 
     it('defines a window.location getter', (done) => {
-      let b
+      let b = null
       let targetURL
       if (process.platform === 'win32') {
         targetURL = `file:///${fixtures.replace(/\\/g, '/')}/pages/base-page.html`
@@ -427,7 +484,7 @@ describe('chromium feature', () => {
       }
       app.once('browser-window-created', (event, window) => {
         window.webContents.once('did-finish-load', () => {
-          assert.equal(b.location, targetURL)
+          expect(b.location.href).to.equal(targetURL)
           b.close()
           done()
         })
@@ -436,8 +493,8 @@ describe('chromium feature', () => {
     })
 
     it('defines a window.location setter', (done) => {
-      let b
-      app.once('browser-window-created', (event, {webContents}) => {
+      let b = null
+      app.once('browser-window-created', (event, { webContents }) => {
         webContents.once('did-finish-load', () => {
           // When it loads, redirect
           b.location = `file://${fixtures}/pages/base-page.html`
@@ -451,43 +508,60 @@ describe('chromium feature', () => {
       b = window.open('about:blank')
     })
 
-    it('open a blank page when no URL is specified', (done) => {
-      let b
-      app.once('browser-window-created', (event, {webContents}) => {
+    it('defines a window.location.href setter', (done) => {
+      let b = null
+      app.once('browser-window-created', (event, { webContents }) => {
         webContents.once('did-finish-load', () => {
-          const {location} = b
-          b.close()
-          assert.equal(location, 'about:blank')
-
-          let c
-          app.once('browser-window-created', (event, {webContents}) => {
-            webContents.once('did-finish-load', () => {
-              const {location} = c
-              c.close()
-              assert.equal(location, 'about:blank')
-              done()
-            })
+          // When it loads, redirect
+          b.location.href = `file://${fixtures}/pages/base-page.html`
+          webContents.once('did-finish-load', () => {
+            // After our second redirect, cleanup and callback
+            b.close()
+            done()
           })
-          c = window.open('')
         })
       })
-      b = window.open()
+      b = window.open('about:blank')
+    })
+
+    it('open a blank page when no URL is specified', async () => {
+      const browserWindowCreated = emittedOnce(app, 'browser-window-created')
+      const w = window.open()
+      try {
+        const [, { webContents }] = await browserWindowCreated
+        await waitForWebContentsToLoad(webContents)
+        expect(w.location.href).to.equal('about:blank')
+      } finally {
+        w.close()
+      }
+    })
+
+    it('open a blank page when an empty URL is specified', async () => {
+      const browserWindowCreated = emittedOnce(app, 'browser-window-created')
+      const w = window.open('')
+      try {
+        const [, { webContents }] = await browserWindowCreated
+        await waitForWebContentsToLoad(webContents)
+        expect(w.location.href).to.equal('about:blank')
+      } finally {
+        w.close()
+      }
     })
 
     it('throws an exception when the arguments cannot be converted to strings', () => {
-      assert.throws(() => {
-        window.open('', {toString: null})
-      }, /Cannot convert object to primitive value/)
+      expect(() => {
+        window.open('', { toString: null })
+      }).to.throw('Cannot convert object to primitive value')
 
-      assert.throws(() => {
-        window.open('', '', {toString: 3})
-      }, /Cannot convert object to primitive value/)
+      expect(() => {
+        window.open('', '', { toString: 3 })
+      }).to.throw('Cannot convert object to primitive value')
     })
 
     it('sets the window title to the specified frameName', (done) => {
-      let b
+      let b = null
       app.once('browser-window-created', (event, createdWindow) => {
-        assert.equal(createdWindow.getTitle(), 'hello')
+        expect(createdWindow.getTitle()).to.equal('hello')
         b.close()
         done()
       })
@@ -495,9 +569,9 @@ describe('chromium feature', () => {
     })
 
     it('does not throw an exception when the frameName is a built-in object property', (done) => {
-      let b
+      let b = null
       app.once('browser-window-created', (event, createdWindow) => {
-        assert.equal(createdWindow.getTitle(), '__proto__')
+        expect(createdWindow.getTitle()).to.equal('__proto__')
         b.close()
         done()
       })
@@ -505,30 +579,34 @@ describe('chromium feature', () => {
     })
 
     it('does not throw an exception when the features include webPreferences', () => {
-      let b
-      assert.doesNotThrow(() => {
+      let b = null
+      expect(() => {
         b = window.open('', '', 'webPreferences=')
-      })
+      }).to.not.throw()
       b.close()
     })
   })
 
   describe('window.opener', () => {
-    let url = `file://${fixtures}/pages/window-opener.html`
-
-    it('is null for main window', (done) => {
-      w = new BrowserWindow({ show: false })
-      w.webContents.once('ipc-message', (event, args) => {
-        assert.deepEqual(args, ['opener', null])
-        done()
+    const url = `file://${fixtures}/pages/window-opener.html`
+    it('is null for main window', async () => {
+      w = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          nodeIntegration: true
+        }
       })
-      w.loadURL(url)
+      const promise = emittedOnce(w.webContents, 'ipc-message')
+      w.loadFile(path.join(fixtures, 'pages', 'window-opener.html'))
+      const [, channel, opener] = await promise
+      expect(channel).to.equal('opener')
+      expect(opener).to.equal(null)
     })
 
     it('is not null for window opened by window.open', (done) => {
-      let b
+      let b = null
       listener = (event) => {
-        assert.equal(event.data, 'object')
+        expect(event.data).to.equal('object')
         b.close()
         done()
       }
@@ -539,7 +617,7 @@ describe('chromium feature', () => {
 
   describe('window.opener access from BrowserWindow', () => {
     const scheme = 'other'
-    let url = `${scheme}://${fixtures}/pages/window-opener-location.html`
+    const url = `${scheme}://${fixtures}/pages/window-opener-location.html`
     let w = null
 
     before((done) => {
@@ -556,9 +634,9 @@ describe('chromium feature', () => {
       w.close()
     })
 
-    it('does nothing when origin of current window does not match opener', (done) => {
+    it('fails when origin of current window does not match opener', (done) => {
       listener = (event) => {
-        assert.equal(event.data, undefined)
+        expect(event.data).to.equal(null)
         done()
       }
       window.addEventListener('message', listener)
@@ -567,7 +645,7 @@ describe('chromium feature', () => {
 
     it('works when origin matches', (done) => {
       listener = (event) => {
-        assert.equal(event.data, location.href)
+        expect(event.data).to.equal(location.href)
         done()
       }
       window.addEventListener('message', listener)
@@ -576,7 +654,7 @@ describe('chromium feature', () => {
 
     it('works when origin does not match opener but has node integration', (done) => {
       listener = (event) => {
-        assert.equal(event.data, location.href)
+        expect(event.data).to.equal(location.href)
         done()
       }
       window.addEventListener('message', listener)
@@ -604,10 +682,10 @@ describe('chromium feature', () => {
       if (webview != null) webview.remove()
     })
 
-    it('does nothing when origin of webview src URL does not match opener', (done) => {
+    it('fails when origin of webview src URL does not match opener', (done) => {
       webview = new WebView()
       webview.addEventListener('console-message', (e) => {
-        assert.equal(e.message, 'null')
+        expect(e.message).to.equal('null')
         done()
       })
       webview.setAttribute('allowpopups', 'on')
@@ -625,7 +703,7 @@ describe('chromium feature', () => {
     it('works when origin matches', (done) => {
       webview = new WebView()
       webview.addEventListener('console-message', (e) => {
-        assert.equal(e.message, webview.src)
+        expect(e.message).to.equal(webview.src)
         done()
       })
       webview.setAttribute('allowpopups', 'on')
@@ -644,7 +722,7 @@ describe('chromium feature', () => {
       webview = new WebView()
       webview.addEventListener('console-message', (e) => {
         webview.remove()
-        assert.equal(e.message, webview.src)
+        expect(e.message).to.equal(webview.src)
         done()
       })
       webview.setAttribute('allowpopups', 'on')
@@ -662,44 +740,23 @@ describe('chromium feature', () => {
   })
 
   describe('window.postMessage', () => {
-    it('sets the source and origin correctly', (done) => {
-      let b
-      listener = (event) => {
-        window.removeEventListener('message', listener)
-        b.close()
-        const message = JSON.parse(event.data)
-        assert.equal(message.data, 'testing')
-        assert.equal(message.origin, 'file://')
-        assert.equal(message.sourceEqualsOpener, true)
-        assert.equal(event.origin, 'file://')
-        done()
-      }
-      window.addEventListener('message', listener)
-      app.once('browser-window-created', (event, {webContents}) => {
-        webContents.once('did-finish-load', () => {
-          b.postMessage('testing', '*')
-        })
-      })
-      b = window.open(`file://${fixtures}/pages/window-open-postMessage.html`, '', 'show=no')
-    })
-
     it('throws an exception when the targetOrigin cannot be converted to a string', () => {
       const b = window.open('')
-      assert.throws(() => {
-        b.postMessage('test', {toString: null})
-      }, /Cannot convert object to primitive value/)
+      expect(() => {
+        b.postMessage('test', { toString: null })
+      }).to.throw('Cannot convert object to primitive value')
       b.close()
     })
   })
 
   describe('window.opener.postMessage', () => {
     it('sets source and origin correctly', (done) => {
-      let b
+      let b = null
       listener = (event) => {
         window.removeEventListener('message', listener)
         b.close()
-        assert.equal(event.source, b)
-        assert.equal(event.origin, 'file://')
+        expect(event.source).to.equal(b)
+        expect(event.origin).to.equal('file://')
         done()
       }
       window.addEventListener('message', listener)
@@ -710,7 +767,7 @@ describe('chromium feature', () => {
       const webview = new WebView()
       webview.addEventListener('console-message', (e) => {
         webview.remove()
-        assert.equal(e.message, 'message')
+        expect(e.message).to.equal('message')
         done()
       })
       webview.allowpopups = true
@@ -746,11 +803,11 @@ describe('chromium feature', () => {
       })
 
       it('delivers messages that match the origin', (done) => {
-        let b
+        let b = null
         listener = (event) => {
           window.removeEventListener('message', listener)
           b.close()
-          assert.equal(event.data, 'deliver')
+          expect(event.data).to.equal('deliver')
           done()
         }
         window.addEventListener('message', listener)
@@ -763,7 +820,6 @@ describe('chromium feature', () => {
     it('does not crash', () => {
       const RUint8Array = remote.getGlobal('Uint8Array')
       const arr = new RUint8Array()
-      assert(arr)
     })
   })
 
@@ -782,7 +838,7 @@ describe('chromium feature', () => {
       }
 
       const webgl = document.createElement('canvas').getContext('webgl')
-      assert.notEqual(webgl, null)
+      expect(webgl).to.not.be.null()
     })
   })
 
@@ -791,7 +847,7 @@ describe('chromium feature', () => {
       const worker = new Worker('../fixtures/workers/worker.js')
       const message = 'ping'
       worker.onmessage = (event) => {
-        assert.equal(event.data, message)
+        expect(event.data).to.equal(message)
         worker.terminate()
         done()
       }
@@ -799,18 +855,18 @@ describe('chromium feature', () => {
     })
 
     it('Worker has no node integration by default', (done) => {
-      let worker = new Worker('../fixtures/workers/worker_node.js')
+      const worker = new Worker('../fixtures/workers/worker_node.js')
       worker.onmessage = (event) => {
-        assert.equal(event.data, 'undefined undefined undefined undefined')
+        expect(event.data).to.equal('undefined undefined undefined undefined')
         worker.terminate()
         done()
       }
     })
 
     it('Worker has node integration with nodeIntegrationInWorker', (done) => {
-      let webview = new WebView()
+      const webview = new WebView()
       webview.addEventListener('ipc-message', (e) => {
-        assert.equal(e.channel, 'object function object function')
+        expect(e.channel).to.equal('object function object function')
         webview.remove()
         done()
       })
@@ -819,37 +875,40 @@ describe('chromium feature', () => {
       document.body.appendChild(webview)
     })
 
-    it('SharedWorker can work', (done) => {
-      const worker = new SharedWorker('../fixtures/workers/shared_worker.js')
-      const message = 'ping'
-      worker.port.onmessage = (event) => {
-        assert.equal(event.data, message)
-        done()
-      }
-      worker.port.postMessage(message)
-    })
-
-    it('SharedWorker has no node integration by default', (done) => {
-      let worker = new SharedWorker('../fixtures/workers/shared_worker_node.js')
-      worker.port.onmessage = (event) => {
-        assert.equal(event.data, 'undefined undefined undefined undefined')
-        done()
-      }
-    })
-
-    it('SharedWorker has node integration with nodeIntegrationInWorker', (done) => {
-      let webview = new WebView()
-      webview.addEventListener('console-message', (e) => {
-        console.log(e)
+    // FIXME: disabled during chromium update due to crash in content::WorkerScriptFetchInitiator::CreateScriptLoaderOnIO
+    xdescribe('SharedWorker', () => {
+      it('can work', (done) => {
+        const worker = new SharedWorker('../fixtures/workers/shared_worker.js')
+        const message = 'ping'
+        worker.port.onmessage = (event) => {
+          expect(event.data).to.equal(message)
+          done()
+        }
+        worker.port.postMessage(message)
       })
-      webview.addEventListener('ipc-message', (e) => {
-        assert.equal(e.channel, 'object function object function')
-        webview.remove()
-        done()
+
+      it('has no node integration by default', (done) => {
+        const worker = new SharedWorker('../fixtures/workers/shared_worker_node.js')
+        worker.port.onmessage = (event) => {
+          expect(event.data).to.equal('undefined undefined undefined undefined')
+          done()
+        }
       })
-      webview.src = `file://${fixtures}/pages/shared_worker.html`
-      webview.setAttribute('webpreferences', 'nodeIntegration, nodeIntegrationInWorker')
-      document.body.appendChild(webview)
+
+      it('has node integration with nodeIntegrationInWorker', (done) => {
+        const webview = new WebView()
+        webview.addEventListener('console-message', (e) => {
+          console.log(e)
+        })
+        webview.addEventListener('ipc-message', (e) => {
+          expect(e.channel).to.equal('object function object function')
+          webview.remove()
+          done()
+        })
+        webview.src = `file://${fixtures}/pages/shared_worker.html`
+        webview.setAttribute('webpreferences', 'nodeIntegration, nodeIntegrationInWorker')
+        document.body.appendChild(webview)
+      })
     })
   })
 
@@ -868,16 +927,30 @@ describe('chromium feature', () => {
       iframe.src = `file://${fixtures}/pages/set-global.html`
       document.body.appendChild(iframe)
       iframe.onload = () => {
-        assert.equal(iframe.contentWindow.test, 'undefined undefined undefined')
+        expect(iframe.contentWindow.test).to.equal('undefined undefined undefined')
         done()
       }
     })
   })
 
   describe('storage', () => {
+    describe('DOM storage quota override', () => {
+      ['localStorage', 'sessionStorage'].forEach((storageName) => {
+        it(`allows saving at least 50MiB in ${storageName}`, () => {
+          const storage = window[storageName]
+          const testKeyName = '_electronDOMStorageQuotaOverrideTest'
+          // 25 * 2^20 UTF-16 characters will require 50MiB
+          const arraySize = 25 * Math.pow(2, 20)
+          storage[testKeyName] = new Array(arraySize).fill('X').join('')
+          expect(storage[testKeyName]).to.have.lengthOf(arraySize)
+          delete storage[testKeyName]
+        })
+      })
+    })
+
     it('requesting persitent quota works', (done) => {
       navigator.webkitPersistentStorage.requestQuota(1024 * 1024, (grantedBytes) => {
-        assert.equal(grantedBytes, 1048576)
+        expect(grantedBytes).to.equal(1048576)
         done()
       })
     })
@@ -887,7 +960,7 @@ describe('chromium feature', () => {
       let contents = null
       before((done) => {
         const handler = (request, callback) => {
-          let parsedUrl = url.parse(request.url)
+          const parsedUrl = url.parse(request.url)
           let filename
           switch (parsedUrl.pathname) {
             case '/localStorage' : filename = 'local_storage.html'; break
@@ -897,7 +970,7 @@ describe('chromium feature', () => {
             case '/cookie' : filename = 'cookie.html'; break
             default : filename = ''
           }
-          callback({path: `${fixtures}/pages/storage/${filename}`})
+          callback({ path: `${fixtures}/pages/storage/${filename}` })
         }
         protocol.registerFileProtocol(protocolName, handler, (error) => done(error))
       })
@@ -907,7 +980,9 @@ describe('chromium feature', () => {
       })
 
       beforeEach(() => {
-        contents = webContents.create({})
+        contents = webContents.create({
+          nodeIntegration: true
+        })
       })
 
       afterEach(() => {
@@ -917,9 +992,7 @@ describe('chromium feature', () => {
 
       it('cannot access localStorage', (done) => {
         ipcMain.once('local-storage-response', (event, error) => {
-          assert.equal(
-            error,
-            'Failed to read the \'localStorage\' property from \'Window\': Access is denied for this document.')
+          expect(error).to.equal(`Failed to read the 'localStorage' property from 'Window': Access is denied for this document.`)
           done()
         })
         contents.loadURL(protocolName + '://host/localStorage')
@@ -927,9 +1000,7 @@ describe('chromium feature', () => {
 
       it('cannot access sessionStorage', (done) => {
         ipcMain.once('session-storage-response', (event, error) => {
-          assert.equal(
-            error,
-            'Failed to read the \'sessionStorage\' property from \'Window\': Access is denied for this document.')
+          expect(error).to.equal(`Failed to read the 'sessionStorage' property from 'Window': Access is denied for this document.`)
           done()
         })
         contents.loadURL(`${protocolName}://host/sessionStorage`)
@@ -937,9 +1008,7 @@ describe('chromium feature', () => {
 
       it('cannot access WebSQL database', (done) => {
         ipcMain.once('web-sql-response', (event, error) => {
-          assert.equal(
-            error,
-            'An attempt was made to break through the security policy of the user agent.')
+          expect(error).to.equal(`Failed to execute 'openDatabase' on 'Window': Access to the WebDatabase API is denied in this context.`)
           done()
         })
         contents.loadURL(`${protocolName}://host/WebSQL`)
@@ -947,19 +1016,74 @@ describe('chromium feature', () => {
 
       it('cannot access indexedDB', (done) => {
         ipcMain.once('indexed-db-response', (event, error) => {
-          assert.equal(error, 'The user denied permission to access the database.')
+          expect(error).to.equal(`Failed to execute 'open' on 'IDBFactory': access to the Indexed Database API is denied in this context.`)
           done()
         })
         contents.loadURL(`${protocolName}://host/indexedDB`)
       })
 
       it('cannot access cookie', (done) => {
-        ipcMain.once('cookie-response', (event, cookie) => {
-          assert(!cookie)
+        ipcMain.once('cookie-response', (event, error) => {
+          expect(error).to.equal(`Failed to set the 'cookie' property on 'Document': Access is denied for this document.`)
           done()
         })
         contents.loadURL(`${protocolName}://host/cookie`)
       })
+    })
+
+    describe('can be accessed', () => {
+      let server = null
+      before((done) => {
+        server = http.createServer((req, res) => {
+          const respond = () => {
+            if (req.url === '/redirect-cross-site') {
+              res.setHeader('Location', `${server.cross_site_url}/redirected`)
+              res.statusCode = 302
+              res.end()
+            } else if (req.url === '/redirected') {
+              res.end('<html><script>window.localStorage</script></html>')
+            } else {
+              res.end()
+            }
+          }
+          setTimeout(respond, 0)
+        })
+        server.listen(0, '127.0.0.1', () => {
+          server.url = `http://127.0.0.1:${server.address().port}`
+          server.cross_site_url = `http://localhost:${server.address().port}`
+          done()
+        })
+      })
+
+      after(() => {
+        server.close()
+        server = null
+      })
+
+      const testLocalStorageAfterXSiteRedirect = (testTitle, extraPreferences = {}) => {
+        it(testTitle, (done) => {
+          w = new BrowserWindow({
+            show: false,
+            ...extraPreferences
+          })
+          let redirected = false
+          w.webContents.on('crashed', () => {
+            expect.fail('renderer crashed / was killed')
+          })
+          w.webContents.on('did-redirect-navigation', (event, url) => {
+            expect(url).to.equal(`${server.cross_site_url}/redirected`)
+            redirected = true
+          })
+          w.webContents.on('did-finish-load', () => {
+            expect(redirected).to.be.true('didnt redirect')
+            done()
+          })
+          w.loadURL(`${server.url}/redirect-cross-site`)
+        })
+      }
+
+      testLocalStorageAfterXSiteRedirect('after a cross-site redirect')
+      testLocalStorageAfterXSiteRedirect('after a cross-site redirect in sandbox mode', { sandbox: true })
     })
   })
 
@@ -987,7 +1111,6 @@ describe('chromium feature', () => {
           }
         })
         const socket = new WebSocket(`ws://127.0.0.1:${port}`)
-        assert(socket)
       })
     })
   })
@@ -1073,7 +1196,7 @@ describe('chromium feature', () => {
         slashes: true
       })
 
-      this.createBrowserWindow = ({plugins, preload}) => {
+      this.createBrowserWindow = ({ plugins, preload }) => {
         w = new BrowserWindow({
           show: false,
           webPreferences: {
@@ -1090,63 +1213,68 @@ describe('chromium feature', () => {
           slashes: true
         })
 
-        this.createBrowserWindow({plugins: true, preload: preloadFile})
+        this.createBrowserWindow({ plugins: true, preload: preloadFile })
         ipcMain.once('pdf-loaded', (event, state) => {
-          assert.equal(state, 'success')
+          expect(state).to.equal('success')
           done()
         })
         w.webContents.on('page-title-updated', () => {
           const parsedURL = url.parse(w.webContents.getURL(), true)
-          assert.equal(parsedURL.protocol, 'chrome:')
-          assert.equal(parsedURL.hostname, 'pdf-viewer')
-          assert.equal(parsedURL.query.src, pagePath)
-          assert.equal(w.webContents.getTitle(), 'cat.pdf')
+          expect(parsedURL.protocol).to.equal('chrome:')
+          expect(parsedURL.hostname).to.equal('pdf-viewer')
+          expect(parsedURL.query.src).to.equal(pagePath)
+          expect(w.webContents.getTitle()).to.equal('cat.pdf')
         })
-        w.webContents.loadURL(pagePath)
+        w.loadFile(path.join(fixtures, 'pages', page))
       }
     })
 
     it('opens when loading a pdf resource as top level navigation', (done) => {
-      this.createBrowserWindow({plugins: true, preload: 'preload-pdf-loaded.js'})
+      this.createBrowserWindow({ plugins: true, preload: 'preload-pdf-loaded.js' })
       ipcMain.once('pdf-loaded', (event, state) => {
-        assert.equal(state, 'success')
+        expect(state).to.equal('success')
         done()
       })
       w.webContents.on('page-title-updated', () => {
         const parsedURL = url.parse(w.webContents.getURL(), true)
-        assert.equal(parsedURL.protocol, 'chrome:')
-        assert.equal(parsedURL.hostname, 'pdf-viewer')
-        assert.equal(parsedURL.query.src, this.pdfSource)
-        assert.equal(w.webContents.getTitle(), 'cat.pdf')
+        expect(parsedURL.protocol).to.equal('chrome:')
+        expect(parsedURL.hostname).to.equal('pdf-viewer')
+        expect(parsedURL.query.src).to.equal(this.pdfSource)
+        expect(w.webContents.getTitle()).to.equal('cat.pdf')
       })
       w.webContents.loadURL(this.pdfSource)
     })
 
     it('opens a pdf link given params, the query string should be escaped', (done) => {
-      this.createBrowserWindow({plugins: true, preload: 'preload-pdf-loaded.js'})
+      this.createBrowserWindow({ plugins: true, preload: 'preload-pdf-loaded.js' })
       ipcMain.once('pdf-loaded', (event, state) => {
-        assert.equal(state, 'success')
+        expect(state).to.equal('success')
         done()
       })
       w.webContents.on('page-title-updated', () => {
         const parsedURL = url.parse(w.webContents.getURL(), true)
-        assert.equal(parsedURL.protocol, 'chrome:')
-        assert.equal(parsedURL.hostname, 'pdf-viewer')
-        assert.equal(parsedURL.query.src, this.pdfSourceWithParams)
-        assert.equal(parsedURL.query.b, undefined)
-        assert(parsedURL.search.endsWith('%3Fa%3D1%26b%3D2'))
-        assert.equal(w.webContents.getTitle(), 'cat.pdf')
+        expect(parsedURL.protocol).to.equal('chrome:')
+        expect(parsedURL.hostname).to.equal('pdf-viewer')
+        expect(parsedURL.query.src).to.equal(this.pdfSourceWithParams)
+        expect(parsedURL.query.b).to.be.undefined()
+        expect(parsedURL.search.endsWith('%3Fa%3D1%26b%3D2')).to.be.true()
+        expect(w.webContents.getTitle()).to.equal('cat.pdf')
       })
       w.webContents.loadURL(this.pdfSourceWithParams)
     })
 
     it('should download a pdf when plugins are disabled', (done) => {
-      this.createBrowserWindow({plugins: false, preload: 'preload-pdf-loaded.js'})
+      this.createBrowserWindow({ plugins: false, preload: 'preload-pdf-loaded.js' })
+      // NOTE(nornagon): this test has been skipped for ages, so there's no way
+      // to refactor it confidently. The 'set-download-option' ipc was removed
+      // around May 2019, so if you're working on the pdf viewer and arrive at
+      // this test and want to know what 'set-download-option' did, look here:
+      // https://github.com/electron/electron/blob/d87b3ead760ae2d20f2401a8dac4ce548f8cd5f5/spec/static/main.js#L164
       ipcRenderer.sendSync('set-download-option', false, false)
       ipcRenderer.once('download-done', (event, state, url, mimeType, receivedBytes, totalBytes, disposition, filename) => {
-        assert.equal(state, 'completed')
-        assert.equal(filename, 'cat.pdf')
-        assert.equal(mimeType, 'application/pdf')
+        expect(state).to.equal('completed')
+        expect(filename).to.equal('cat.pdf')
+        expect(mimeType).to.equal('application/pdf')
         fs.unlinkSync(path.join(fixtures, 'mock.pdf'))
         done()
       })
@@ -1155,8 +1283,8 @@ describe('chromium feature', () => {
 
     it('should not open when pdf is requested as sub resource', (done) => {
       fetch(this.pdfSource).then((res) => {
-        assert.equal(res.status, 200)
-        assert.notEqual(document.title, 'cat.pdf')
+        expect(res.status).to.equal(200)
+        expect(document.title).to.not.equal('cat.pdf')
         done()
       }).catch((e) => done(e))
     })
@@ -1172,44 +1300,144 @@ describe('chromium feature', () => {
 
   describe('window.alert(message, title)', () => {
     it('throws an exception when the arguments cannot be converted to strings', () => {
-      assert.throws(() => {
-        window.alert({toString: null})
-      }, /Cannot convert object to primitive value/)
+      expect(() => {
+        window.alert({ toString: null })
+      }).to.throw('Cannot convert object to primitive value')
     })
   })
 
   describe('window.confirm(message, title)', () => {
     it('throws an exception when the arguments cannot be converted to strings', () => {
-      assert.throws(() => {
-        window.confirm({toString: null}, 'title')
-      }, /Cannot convert object to primitive value/)
+      expect(() => {
+        window.confirm({ toString: null }, 'title')
+      }).to.throw('Cannot convert object to primitive value')
     })
   })
 
   describe('window.history', () => {
     describe('window.history.go(offset)', () => {
       it('throws an exception when the argumnet cannot be converted to a string', () => {
-        assert.throws(() => {
-          window.history.go({toString: null})
-        }, /Cannot convert object to primitive value/)
+        expect(() => {
+          window.history.go({ toString: null })
+        }).to.throw('Cannot convert object to primitive value')
       })
     })
 
     describe('window.history.pushState', () => {
       it('should push state after calling history.pushState() from the same url', (done) => {
         w = new BrowserWindow({ show: false })
-        w.webContents.once('did-finish-load', () => {
+        w.webContents.once('did-finish-load', async () => {
           // History should have current page by now.
-          assert.equal(w.webContents.length(), 1)
+          expect(w.webContents.length()).to.equal(1)
 
-          w.webContents.executeJavaScript('window.history.pushState({}, "")', () => {
+          w.webContents.executeJavaScript('window.history.pushState({}, "")').then(() => {
             // Initial page + pushed state
-            assert.equal(w.webContents.length(), 2)
+            expect(w.webContents.length()).to.equal(2)
             done()
           })
         })
         w.loadURL('about:blank')
       })
     })
+  })
+
+  describe('SpeechSynthesis', () => {
+    before(function () {
+      if (isCI || !features.isTtsEnabled()) {
+        this.skip()
+      }
+    })
+
+    it('should emit lifecycle events', async () => {
+      const sentence = `long sentence which will take at least a few seconds to
+          utter so that it's possible to pause and resume before the end`
+      const utter = new SpeechSynthesisUtterance(sentence)
+      // Create a dummy utterence so that speech synthesis state
+      // is initialized for later calls.
+      speechSynthesis.speak(new SpeechSynthesisUtterance())
+      speechSynthesis.cancel()
+      speechSynthesis.speak(utter)
+      // paused state after speak()
+      expect(speechSynthesis.paused).to.be.false()
+      await new Promise((resolve) => { utter.onstart = resolve })
+      // paused state after start event
+      expect(speechSynthesis.paused).to.be.false()
+
+      speechSynthesis.pause()
+      // paused state changes async, right before the pause event
+      expect(speechSynthesis.paused).to.be.false()
+      await new Promise((resolve) => { utter.onpause = resolve })
+      expect(speechSynthesis.paused).to.be.true()
+
+      speechSynthesis.resume()
+      await new Promise((resolve) => { utter.onresume = resolve })
+      // paused state after resume event
+      expect(speechSynthesis.paused).to.be.false()
+
+      await new Promise((resolve) => { utter.onend = resolve })
+    })
+  })
+})
+
+describe('console functions', () => {
+  it('should exist', () => {
+    expect(console.log, 'log').to.be.a('function')
+    expect(console.error, 'error').to.be.a('function')
+    expect(console.warn, 'warn').to.be.a('function')
+    expect(console.info, 'info').to.be.a('function')
+    expect(console.debug, 'debug').to.be.a('function')
+    expect(console.trace, 'trace').to.be.a('function')
+    expect(console.time, 'time').to.be.a('function')
+    expect(console.timeEnd, 'timeEnd').to.be.a('function')
+  })
+})
+
+describe('font fallback', () => {
+  async function getRenderedFonts (html) {
+    const w = new BrowserWindow({ show: false })
+    try {
+      await w.loadURL(`data:text/html,${html}`)
+      w.webContents.debugger.attach()
+      const sendCommand = (...args) => w.webContents.debugger.sendCommand(...args)
+      const { nodeId } = (await sendCommand('DOM.getDocument')).root.children[0]
+      await sendCommand('CSS.enable')
+      const { fonts } = await sendCommand('CSS.getPlatformFontsForNode', { nodeId })
+      return fonts
+    } finally {
+      w.close()
+    }
+  }
+
+  it('should use Helvetica for sans-serif on Mac, and Arial on Windows and Linux', async () => {
+    const html = `<body style="font-family: sans-serif">test</body>`
+    const fonts = await getRenderedFonts(html)
+    expect(fonts).to.be.an('array')
+    expect(fonts).to.have.length(1)
+    expect(fonts[0].familyName).to.equal({
+      'win32': 'Arial',
+      'darwin': 'Helvetica',
+      'linux': 'DejaVu Sans' // I think this depends on the distro? We don't specify a default.
+    }[process.platform])
+  })
+
+  it('should fall back to Japanese font for sans-serif Japanese script', async function () {
+    if (process.platform === 'linux') {
+      return this.skip()
+    }
+    const html = `
+    <html lang="ja-JP">
+      <head>
+        <meta charset="utf-8" />
+      </head>
+      <body style="font-family: sans-serif">test 智史</body>
+    </html>
+    `
+    const fonts = await getRenderedFonts(html)
+    expect(fonts).to.be.an('array')
+    expect(fonts).to.have.length(1)
+    expect(fonts[0].familyName).to.equal({
+      'win32': 'Meiryo',
+      'darwin': 'Hiragino Kaku Gothic ProN'
+    }[process.platform])
   })
 })

@@ -2,10 +2,11 @@ const chai = require('chai')
 const dirtyChai = require('dirty-chai')
 const http = require('http')
 const path = require('path')
-const {closeWindow} = require('./window-helpers')
-const BrowserWindow = require('electron').remote.BrowserWindow
+const { emittedOnce } = require('./events-helpers')
+const { closeWindow } = require('./window-helpers')
+const { BrowserWindow } = require('electron').remote
 
-const {expect} = chai
+const { expect } = chai
 chai.use(dirtyChai)
 
 describe('debugger module', () => {
@@ -23,17 +24,18 @@ describe('debugger module', () => {
   afterEach(() => closeWindow(w).then(() => { w = null }))
 
   describe('debugger.attach', () => {
-    it('fails when devtools is already open', done => {
+    it('succeeds when devtools is already open', done => {
       w.webContents.on('did-finish-load', () => {
         w.webContents.openDevTools()
         try {
           w.webContents.debugger.attach()
         } catch (err) {
-          expect(w.webContents.debugger.isAttached()).to.be.true()
-          done()
+          done(`unexpected error : ${err}`)
         }
+        expect(w.webContents.debugger.isAttached()).to.be.true()
+        done()
       })
-      w.webContents.loadURL(`file://${path.join(fixtures, 'pages', 'a.html')}`)
+      w.webContents.loadFile(path.join(fixtures, 'pages', 'a.html'))
     })
 
     it('fails when protocol version is not supported', done => {
@@ -71,6 +73,24 @@ describe('debugger module', () => {
       }
       w.webContents.debugger.detach()
     })
+
+    it('doesn\'t disconnect an active devtools session', done => {
+      w.webContents.loadURL('about:blank')
+      try {
+        w.webContents.debugger.attach()
+      } catch (err) {
+        return done(`unexpected error : ${err}`)
+      }
+      w.webContents.openDevTools()
+      w.webContents.once('devtools-opened', () => {
+        w.webContents.debugger.detach()
+      })
+      w.webContents.debugger.on('detach', (e, reason) => {
+        expect(w.webContents.debugger.isAttached()).to.be.false()
+        expect(w.devToolsWebContents.isDestroyed()).to.be.false()
+        done()
+      })
+    })
   })
 
   describe('debugger.sendCommand', () => {
@@ -83,32 +103,41 @@ describe('debugger module', () => {
       }
     })
 
-    it('returns response', done => {
+    it('returns response', async () => {
       w.webContents.loadURL('about:blank')
-      try {
-        w.webContents.debugger.attach()
-      } catch (err) {
-        return done(`unexpected error : ${err}`)
-      }
+      w.webContents.debugger.attach()
 
-      const callback = (err, res) => {
-        expect(err.message).to.be.undefined()
-        expect(res.wasThrown).to.be.undefined()
-        expect(res.result.value).to.equal(6)
+      const params = { 'expression': '4+2' }
+      const res = await w.webContents.debugger.sendCommand('Runtime.evaluate', params)
 
-        w.webContents.debugger.detach()
-        done()
-      }
+      expect(res.wasThrown).to.be.undefined()
+      expect(res.result.value).to.equal(6)
 
-      const params = {'expression': '4+2'}
-      w.webContents.debugger.sendCommand('Runtime.evaluate', params, callback)
+      w.webContents.debugger.detach()
+    })
+
+    it('returns response when devtools is opened', async () => {
+      w.webContents.loadURL('about:blank')
+      w.webContents.debugger.attach()
+
+      const opened = emittedOnce(w.webContents, 'devtools-opened')
+      w.webContents.openDevTools()
+      await opened
+
+      const params = { 'expression': '4+2' }
+      const res = await w.webContents.debugger.sendCommand('Runtime.evaluate', params)
+
+      expect(res.wasThrown).to.be.undefined()
+      expect(res.result.value).to.equal(6)
+
+      w.webContents.debugger.detach()
     })
 
     it('fires message event', done => {
       const url = process.platform !== 'win32'
         ? `file://${path.join(fixtures, 'pages', 'a.html')}`
         : `file:///${path.join(fixtures, 'pages', 'a.html').replace(/\\/g, '/')}`
-      w.webContents.loadURL(url)
+      w.webContents.loadFile(path.join(fixtures, 'pages', 'a.html'))
 
       try {
         w.webContents.debugger.attach()
@@ -129,23 +158,17 @@ describe('debugger module', () => {
       w.webContents.debugger.sendCommand('Console.enable')
     })
 
-    it('returns error message when command fails', done => {
+    it('returns error message when command fails', async () => {
       w.webContents.loadURL('about:blank')
-      try {
-        w.webContents.debugger.attach()
-      } catch (err) {
-        done(`unexpected error : ${err}`)
-      }
+      w.webContents.debugger.attach()
 
-      w.webContents.debugger.sendCommand('Test', err => {
-        expect(err.message).to.equal("'Test' wasn't found")
-        w.webContents.debugger.detach()
-        done()
-      })
+      const promise = w.webContents.debugger.sendCommand('Test')
+      await expect(promise).to.be.eventually.rejectedWith(Error, "'Test' wasn't found")
+
+      w.webContents.debugger.detach()
     })
 
-    // TODO(alexeykuzmin): [Ch66] Times out. Fix it and enable back.
-    xit('handles valid unicode characters in message', (done) => {
+    it('handles valid unicode characters in message', (done) => {
       try {
         w.webContents.debugger.attach()
       } catch (err) {
@@ -156,7 +179,7 @@ describe('debugger module', () => {
         if (method === 'Network.loadingFinished') {
           w.webContents.debugger.sendCommand('Network.getResponseBody', {
             requestId: params.requestId
-          }, (_, data) => {
+          }).then(data => {
             expect(data.body).to.equal('\u0024')
             done()
           })
@@ -174,8 +197,7 @@ describe('debugger module', () => {
       })
     })
 
-    // TODO(alexeykuzmin): [Ch66] Times out. Fix it and enable back.
-    xit('does not crash for invalid unicode characters in message', (done) => {
+    it('does not crash for invalid unicode characters in message', (done) => {
       try {
         w.webContents.debugger.attach()
       } catch (err) {

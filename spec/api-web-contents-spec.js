@@ -1,16 +1,18 @@
 'use strict'
 
-const assert = require('assert')
+const ChildProcess = require('child_process')
+const fs = require('fs')
 const http = require('http')
 const path = require('path')
-const {closeWindow} = require('./window-helpers')
-const {emittedOnce} = require('./events-helpers')
+const { closeWindow } = require('./window-helpers')
+const { emittedOnce } = require('./events-helpers')
 const chai = require('chai')
 const dirtyChai = require('dirty-chai')
 
-const {ipcRenderer, remote} = require('electron')
-const {BrowserWindow, webContents, ipcMain, session} = remote
-const {expect} = chai
+const features = process.electronBinding('features')
+const { ipcRenderer, remote, clipboard } = require('electron')
+const { BrowserWindow, webContents, ipcMain, session } = remote
+const { expect } = chai
 
 const isCi = remote.getGlobal('isCi')
 
@@ -29,563 +31,14 @@ describe('webContents module', () => {
       width: 400,
       height: 400,
       webPreferences: {
-        backgroundThrottling: false
+        backgroundThrottling: false,
+        nodeIntegration: true,
+        webviewTag: true
       }
     })
   })
 
   afterEach(() => closeWindow(w).then(() => { w = null }))
-
-  describe('getAllWebContents() API', () => {
-    it('returns an array of web contents', (done) => {
-      w.webContents.on('devtools-opened', () => {
-        const all = webContents.getAllWebContents().sort((a, b) => {
-          return a.getId() - b.getId()
-        })
-
-        assert.ok(all.length >= 4)
-        assert.equal(all[0].getType(), 'window')
-        assert.equal(all[all.length - 2].getType(), 'remote')
-        assert.equal(all[all.length - 1].getType(), 'webview')
-
-        done()
-      })
-
-      w.loadURL(`file://${path.join(fixtures, 'pages', 'webview-zoom-factor.html')}`)
-      w.webContents.openDevTools()
-    })
-  })
-
-  describe('getFocusedWebContents() API', () => {
-    it('returns the focused web contents', (done) => {
-      if (isCi) return done()
-
-      const specWebContents = remote.getCurrentWebContents()
-      assert.equal(specWebContents.getId(), webContents.getFocusedWebContents().getId())
-
-      specWebContents.once('devtools-opened', () => {
-        assert.equal(specWebContents.devToolsWebContents.getId(), webContents.getFocusedWebContents().getId())
-        specWebContents.closeDevTools()
-      })
-
-      specWebContents.once('devtools-closed', () => {
-        assert.equal(specWebContents.getId(), webContents.getFocusedWebContents().getId())
-        done()
-      })
-
-      specWebContents.openDevTools()
-    })
-
-    it('does not crash when called on a detached dev tools window', (done) => {
-      const specWebContents = w.webContents
-
-      specWebContents.once('devtools-opened', () => {
-        assert.doesNotThrow(() => {
-          webContents.getFocusedWebContents()
-        })
-        specWebContents.closeDevTools()
-      })
-
-      specWebContents.once('devtools-closed', () => {
-        assert.doesNotThrow(() => {
-          webContents.getFocusedWebContents()
-        })
-        done()
-      })
-
-      specWebContents.openDevTools({mode: 'detach'})
-      w.inspectElement(100, 100)
-    })
-  })
-
-  describe('setDevToolsWebContents() API', () => {
-    it('sets arbitry webContents as devtools', (done) => {
-      let devtools = new BrowserWindow({show: false})
-      devtools.webContents.once('dom-ready', () => {
-        assert.ok(devtools.getURL().startsWith('chrome-devtools://devtools'))
-        devtools.webContents.executeJavaScript('InspectorFrontendHost.constructor.name', (name) => {
-          assert.ok(name, 'InspectorFrontendHostImpl')
-          devtools.destroy()
-          done()
-        })
-      })
-      w.webContents.setDevToolsWebContents(devtools.webContents)
-      w.webContents.openDevTools()
-    })
-  })
-
-  describe('isFocused() API', () => {
-    it('returns false when the window is hidden', () => {
-      BrowserWindow.getAllWindows().forEach((window) => {
-        assert.equal(!window.isVisible() && window.webContents.isFocused(), false)
-      })
-    })
-  })
-
-  describe('isCurrentlyAudible() API', () => {
-    it('returns whether audio is playing', async () => {
-      w.loadURL(`file://${path.join(__dirname, 'fixtures', 'api', 'is-currently-audible.html')}`)
-      w.show()
-      await emittedOnce(w.webContents, 'did-finish-load')
-
-      expect(w.webContents.isCurrentlyAudible()).to.be.false()
-
-      w.webContents.send('play')
-      await emittedOnce(ipcMain, 'playing')
-
-      expect(w.webContents.isCurrentlyAudible()).to.be.true()
-    })
-  })
-
-  describe('getWebPreferences() API', () => {
-    it('should not crash when called for devTools webContents', (done) => {
-      w.webContents.openDevTools()
-      w.webContents.once('devtools-opened', () => {
-        assert(!w.devToolsWebContents.getWebPreferences())
-        done()
-      })
-    })
-  })
-
-  describe('before-input-event event', () => {
-    it('can prevent document keyboard events', (done) => {
-      w.loadURL(`file://${path.join(__dirname, 'fixtures', 'pages', 'key-events.html')}`)
-      w.webContents.once('did-finish-load', () => {
-        ipcMain.once('keydown', (event, key) => {
-          assert.equal(key, 'b')
-          done()
-        })
-
-        ipcRenderer.send('prevent-next-input-event', 'a', w.webContents.id)
-        w.webContents.sendInputEvent({type: 'keyDown', keyCode: 'a'})
-        w.webContents.sendInputEvent({type: 'keyDown', keyCode: 'b'})
-      })
-    })
-
-    it('has the correct properties', (done) => {
-      w.loadURL(`file://${path.join(__dirname, 'fixtures', 'pages', 'base-page.html')}`)
-      w.webContents.once('did-finish-load', () => {
-        const testBeforeInput = (opts) => {
-          return new Promise((resolve, reject) => {
-            w.webContents.once('before-input-event', (event, input) => {
-              assert.equal(input.type, opts.type)
-              assert.equal(input.key, opts.key)
-              assert.equal(input.code, opts.code)
-              assert.equal(input.isAutoRepeat, opts.isAutoRepeat)
-              assert.equal(input.shift, opts.shift)
-              assert.equal(input.control, opts.control)
-              assert.equal(input.alt, opts.alt)
-              assert.equal(input.meta, opts.meta)
-              resolve()
-            })
-
-            const modifiers = []
-            if (opts.shift) modifiers.push('shift')
-            if (opts.control) modifiers.push('control')
-            if (opts.alt) modifiers.push('alt')
-            if (opts.meta) modifiers.push('meta')
-            if (opts.isAutoRepeat) modifiers.push('isAutoRepeat')
-
-            w.webContents.sendInputEvent({
-              type: opts.type,
-              keyCode: opts.keyCode,
-              modifiers: modifiers
-            })
-          })
-        }
-
-        Promise.resolve().then(() => {
-          return testBeforeInput({
-            type: 'keyDown',
-            key: 'A',
-            code: 'KeyA',
-            keyCode: 'a',
-            shift: true,
-            control: true,
-            alt: true,
-            meta: true,
-            isAutoRepeat: true
-          })
-        }).then(() => {
-          return testBeforeInput({
-            type: 'keyUp',
-            key: '.',
-            code: 'Period',
-            keyCode: '.',
-            shift: false,
-            control: true,
-            alt: true,
-            meta: false,
-            isAutoRepeat: false
-          })
-        }).then(() => {
-          return testBeforeInput({
-            type: 'keyUp',
-            key: '!',
-            code: 'Digit1',
-            keyCode: '1',
-            shift: true,
-            control: false,
-            alt: false,
-            meta: true,
-            isAutoRepeat: false
-          })
-        }).then(() => {
-          return testBeforeInput({
-            type: 'keyUp',
-            key: 'Tab',
-            code: 'Tab',
-            keyCode: 'Tab',
-            shift: false,
-            control: true,
-            alt: false,
-            meta: false,
-            isAutoRepeat: true
-          })
-        }).then(done).catch(done)
-      })
-    })
-  })
-
-  describe('sendInputEvent(event)', () => {
-    beforeEach((done) => {
-      w.loadURL(`file://${path.join(__dirname, 'fixtures', 'pages', 'key-events.html')}`)
-      w.webContents.once('did-finish-load', () => done())
-    })
-
-    it('can send keydown events', (done) => {
-      ipcMain.once('keydown', (event, key, code, keyCode, shiftKey, ctrlKey, altKey) => {
-        assert.equal(key, 'a')
-        assert.equal(code, 'KeyA')
-        assert.equal(keyCode, 65)
-        assert.equal(shiftKey, false)
-        assert.equal(ctrlKey, false)
-        assert.equal(altKey, false)
-        done()
-      })
-      w.webContents.sendInputEvent({type: 'keyDown', keyCode: 'A'})
-    })
-
-    it('can send keydown events with modifiers', (done) => {
-      ipcMain.once('keydown', (event, key, code, keyCode, shiftKey, ctrlKey, altKey) => {
-        assert.equal(key, 'Z')
-        assert.equal(code, 'KeyZ')
-        assert.equal(keyCode, 90)
-        assert.equal(shiftKey, true)
-        assert.equal(ctrlKey, true)
-        assert.equal(altKey, false)
-        done()
-      })
-      w.webContents.sendInputEvent({type: 'keyDown', keyCode: 'Z', modifiers: ['shift', 'ctrl']})
-    })
-
-    it('can send keydown events with special keys', (done) => {
-      ipcMain.once('keydown', (event, key, code, keyCode, shiftKey, ctrlKey, altKey) => {
-        assert.equal(key, 'Tab')
-        assert.equal(code, 'Tab')
-        assert.equal(keyCode, 9)
-        assert.equal(shiftKey, false)
-        assert.equal(ctrlKey, false)
-        assert.equal(altKey, true)
-        done()
-      })
-      w.webContents.sendInputEvent({type: 'keyDown', keyCode: 'Tab', modifiers: ['alt']})
-    })
-
-    it('can send char events', (done) => {
-      ipcMain.once('keypress', (event, key, code, keyCode, shiftKey, ctrlKey, altKey) => {
-        assert.equal(key, 'a')
-        assert.equal(code, 'KeyA')
-        assert.equal(keyCode, 65)
-        assert.equal(shiftKey, false)
-        assert.equal(ctrlKey, false)
-        assert.equal(altKey, false)
-        done()
-      })
-      w.webContents.sendInputEvent({type: 'keyDown', keyCode: 'A'})
-      w.webContents.sendInputEvent({type: 'char', keyCode: 'A'})
-    })
-
-    it('can send char events with modifiers', (done) => {
-      ipcMain.once('keypress', (event, key, code, keyCode, shiftKey, ctrlKey, altKey) => {
-        assert.equal(key, 'Z')
-        assert.equal(code, 'KeyZ')
-        assert.equal(keyCode, 90)
-        assert.equal(shiftKey, true)
-        assert.equal(ctrlKey, true)
-        assert.equal(altKey, false)
-        done()
-      })
-      w.webContents.sendInputEvent({type: 'keyDown', keyCode: 'Z'})
-      w.webContents.sendInputEvent({type: 'char', keyCode: 'Z', modifiers: ['shift', 'ctrl']})
-    })
-  })
-
-  it('supports inserting CSS', (done) => {
-    w.loadURL('about:blank')
-    w.webContents.insertCSS('body { background-repeat: round; }')
-    w.webContents.executeJavaScript('window.getComputedStyle(document.body).getPropertyValue("background-repeat")', (result) => {
-      assert.equal(result, 'round')
-      done()
-    })
-  })
-
-  it('supports inspecting an element in the devtools', (done) => {
-    w.loadURL('about:blank')
-    w.webContents.once('devtools-opened', () => {
-      done()
-    })
-    w.webContents.inspectElement(10, 10)
-  })
-
-  describe('startDrag({file, icon})', () => {
-    it('throws errors for a missing file or a missing/empty icon', () => {
-      assert.throws(() => {
-        w.webContents.startDrag({icon: path.join(__dirname, 'fixtures', 'assets', 'logo.png')})
-      }, /Must specify either 'file' or 'files' option/)
-
-      assert.throws(() => {
-        w.webContents.startDrag({file: __filename})
-      }, /Must specify 'icon' option/)
-
-      if (process.platform === 'darwin') {
-        assert.throws(() => {
-          w.webContents.startDrag({file: __filename, icon: __filename})
-        }, /Must specify non-empty 'icon' option/)
-      }
-    })
-  })
-
-  // TODO(alexeykuzmin): [Ch66] Enable the test. Passes locally.
-  xdescribe('focus()', () => {
-    describe('when the web contents is hidden', () => {
-      it('does not blur the focused window', (done) => {
-        ipcMain.once('answer', (event, parentFocused, childFocused) => {
-          assert.equal(parentFocused, true)
-          assert.equal(childFocused, false)
-          done()
-        })
-        w.show()
-        w.loadURL(`file://${path.join(__dirname, 'fixtures', 'pages', 'focus-web-contents.html')}`)
-      })
-    })
-  })
-
-  describe('getOSProcessId()', () => {
-    it('returns a valid procress id', (done) => {
-      assert.strictEqual(w.webContents.getOSProcessId(), 0)
-
-      w.webContents.once('did-finish-load', () => {
-        const pid = w.webContents.getOSProcessId()
-        assert.equal(typeof pid, 'number')
-        assert(pid > 0, `pid ${pid} is not greater than 0`)
-        done()
-      })
-      w.loadURL('about:blank')
-    })
-  })
-
-  describe('zoom api', () => {
-    const zoomScheme = remote.getGlobal('zoomScheme')
-    const hostZoomMap = {
-      host1: 0.3,
-      host2: 0.7,
-      host3: 0.2
-    }
-
-    before((done) => {
-      const protocol = session.defaultSession.protocol
-      protocol.registerStringProtocol(zoomScheme, (request, callback) => {
-        const response = `<script>
-                            const {ipcRenderer, remote} = require('electron')
-                            ipcRenderer.send('set-zoom', window.location.hostname)
-                            ipcRenderer.on(window.location.hostname + '-zoom-set', () => {
-                              remote.getCurrentWebContents().getZoomLevel((zoomLevel) => {
-                                ipcRenderer.send(window.location.hostname + '-zoom-level', zoomLevel)
-                              })
-                            })
-                          </script>`
-        callback({data: response, mimeType: 'text/html'})
-      }, (error) => done(error))
-    })
-
-    after((done) => {
-      const protocol = session.defaultSession.protocol
-      protocol.unregisterProtocol(zoomScheme, (error) => done(error))
-    })
-
-    it('can set the correct zoom level', (done) => {
-      w.loadURL('about:blank')
-      w.webContents.on('did-finish-load', () => {
-        w.webContents.getZoomLevel((zoomLevel) => {
-          assert.equal(zoomLevel, 0.0)
-          w.webContents.setZoomLevel(0.5)
-          w.webContents.getZoomLevel((zoomLevel) => {
-            assert.equal(zoomLevel, 0.5)
-            w.webContents.setZoomLevel(0)
-            done()
-          })
-        })
-      })
-    })
-
-    it('can persist zoom level across navigation', (done) => {
-      let finalNavigation = false
-      ipcMain.on('set-zoom', (e, host) => {
-        const zoomLevel = hostZoomMap[host]
-        if (!finalNavigation) w.webContents.setZoomLevel(zoomLevel)
-        e.sender.send(`${host}-zoom-set`)
-      })
-      ipcMain.on('host1-zoom-level', (e, zoomLevel) => {
-        const expectedZoomLevel = hostZoomMap.host1
-        assert.equal(zoomLevel, expectedZoomLevel)
-        if (finalNavigation) {
-          done()
-        } else {
-          w.loadURL(`${zoomScheme}://host2`)
-        }
-      })
-      ipcMain.once('host2-zoom-level', (e, zoomLevel) => {
-        const expectedZoomLevel = hostZoomMap.host2
-        assert.equal(zoomLevel, expectedZoomLevel)
-        finalNavigation = true
-        w.webContents.goBack()
-      })
-      w.loadURL(`${zoomScheme}://host1`)
-    })
-
-    it('can propagate zoom level across same session', (done) => {
-      const w2 = new BrowserWindow({
-        show: false
-      })
-      w2.webContents.on('did-finish-load', () => {
-        w.webContents.getZoomLevel((zoomLevel1) => {
-          assert.equal(zoomLevel1, hostZoomMap.host3)
-          w2.webContents.getZoomLevel((zoomLevel2) => {
-            assert.equal(zoomLevel1, zoomLevel2)
-            w2.setClosable(true)
-            w2.close()
-            done()
-          })
-        })
-      })
-      w.webContents.on('did-finish-load', () => {
-        w.webContents.setZoomLevel(hostZoomMap.host3)
-        w2.loadURL(`${zoomScheme}://host3`)
-      })
-      w.loadURL(`${zoomScheme}://host3`)
-    })
-
-    it('cannot propagate zoom level across different session', (done) => {
-      const w2 = new BrowserWindow({
-        show: false,
-        webPreferences: {
-          partition: 'temp'
-        }
-      })
-      const protocol = w2.webContents.session.protocol
-      protocol.registerStringProtocol(zoomScheme, (request, callback) => {
-        callback('hello')
-      }, (error) => {
-        if (error) return done(error)
-        w2.webContents.on('did-finish-load', () => {
-          w.webContents.getZoomLevel((zoomLevel1) => {
-            assert.equal(zoomLevel1, hostZoomMap.host3)
-            w2.webContents.getZoomLevel((zoomLevel2) => {
-              assert.equal(zoomLevel2, 0)
-              assert.notEqual(zoomLevel1, zoomLevel2)
-              protocol.unregisterProtocol(zoomScheme, (error) => {
-                if (error) return done(error)
-                w2.setClosable(true)
-                w2.close()
-                done()
-              })
-            })
-          })
-        })
-        w.webContents.on('did-finish-load', () => {
-          w.webContents.setZoomLevel(hostZoomMap.host3)
-          w2.loadURL(`${zoomScheme}://host3`)
-        })
-        w.loadURL(`${zoomScheme}://host3`)
-      })
-    })
-
-    it('can persist when it contains iframe', (done) => {
-      const server = http.createServer((req, res) => {
-        setTimeout(() => {
-          res.end()
-        }, 200)
-      })
-      server.listen(0, '127.0.0.1', () => {
-        const url = 'http://127.0.0.1:' + server.address().port
-        const content = `<iframe src=${url}></iframe>`
-        w.webContents.on('did-frame-finish-load', (e, isMainFrame) => {
-          if (!isMainFrame) {
-            w.webContents.getZoomLevel((zoomLevel) => {
-              assert.equal(zoomLevel, 2.0)
-              w.webContents.setZoomLevel(0)
-              server.close()
-              done()
-            })
-          }
-        })
-        w.webContents.on('dom-ready', () => {
-          w.webContents.setZoomLevel(2.0)
-        })
-        w.loadURL(`data:text/html,${content}`)
-      })
-    })
-
-    it('cannot propagate when used with webframe', (done) => {
-      let finalZoomLevel = 0
-      const w2 = new BrowserWindow({
-        show: false
-      })
-      w2.webContents.on('did-finish-load', () => {
-        w.webContents.getZoomLevel((zoomLevel1) => {
-          assert.equal(zoomLevel1, finalZoomLevel)
-          w2.webContents.getZoomLevel((zoomLevel2) => {
-            assert.equal(zoomLevel2, 0)
-            assert.notEqual(zoomLevel1, zoomLevel2)
-            w2.setClosable(true)
-            w2.close()
-            done()
-          })
-        })
-      })
-      ipcMain.once('temporary-zoom-set', (e, zoomLevel) => {
-        w2.loadURL(`file://${fixtures}/pages/c.html`)
-        finalZoomLevel = zoomLevel
-      })
-      w.loadURL(`file://${fixtures}/pages/webframe-zoom.html`)
-    })
-
-    it('cannot persist zoom level after navigation with webFrame', (done) => {
-      let initialNavigation = true
-      const source = `
-        const {ipcRenderer, webFrame} = require('electron')
-        webFrame.setZoomLevel(0.6)
-        ipcRenderer.send('zoom-level-set', webFrame.getZoomLevel())
-      `
-      w.webContents.on('did-finish-load', () => {
-        if (initialNavigation) {
-          w.webContents.executeJavaScript(source, () => {})
-        } else {
-          w.webContents.getZoomLevel((zoomLevel) => {
-            assert.equal(zoomLevel, 0)
-            done()
-          })
-        }
-      })
-      ipcMain.once('zoom-level-set', (e, zoomLevel) => {
-        assert.equal(zoomLevel, 0.6)
-        w.loadURL(`file://${fixtures}/pages/d.html`)
-        initialNavigation = false
-      })
-      w.loadURL(`file://${fixtures}/pages/c.html`)
-    })
-  })
 
   describe('webrtc ip policy api', () => {
     it('can set and get webrtc ip policies', () => {
@@ -597,40 +50,106 @@ describe('webContents module', () => {
       ]
       policies.forEach((policy) => {
         w.webContents.setWebRTCIPHandlingPolicy(policy)
-        assert.equal(w.webContents.getWebRTCIPHandlingPolicy(), policy)
+        expect(w.webContents.getWebRTCIPHandlingPolicy()).to.equal(policy)
       })
     })
   })
 
-  describe('will-prevent-unload event', () => {
-    it('does not emit if beforeunload returns undefined', (done) => {
-      w.once('closed', () => {
+  describe('render view deleted events', () => {
+    let server = null
+
+    before((done) => {
+      server = http.createServer((req, res) => {
+        const respond = () => {
+          if (req.url === '/redirect-cross-site') {
+            res.setHeader('Location', `${server.cross_site_url}/redirected`)
+            res.statusCode = 302
+            res.end()
+          } else if (req.url === '/redirected') {
+            res.end('<html><script>window.localStorage</script></html>')
+          } else {
+            res.end()
+          }
+        }
+        setTimeout(respond, 0)
+      })
+      server.listen(0, '127.0.0.1', () => {
+        server.url = `http://127.0.0.1:${server.address().port}`
+        server.cross_site_url = `http://localhost:${server.address().port}`
         done()
       })
-      w.webContents.on('will-prevent-unload', (e) => {
-        assert.fail('should not have fired')
-      })
-      w.loadURL('file://' + path.join(fixtures, 'api', 'close-beforeunload-undefined.html'))
     })
 
-    it('emits if beforeunload returns false', (done) => {
-      w.webContents.on('will-prevent-unload', () => {
+    after(() => {
+      server.close()
+      server = null
+    })
+
+    it('does not emit current-render-view-deleted when speculative RVHs are deleted', (done) => {
+      let currentRenderViewDeletedEmitted = false
+      w.webContents.once('destroyed', () => {
+        expect(currentRenderViewDeletedEmitted).to.be.false('current-render-view-deleted was emitted')
         done()
       })
-      w.loadURL('file://' + path.join(fixtures, 'api', 'close-beforeunload-false.html'))
+      const renderViewDeletedHandler = () => {
+        currentRenderViewDeletedEmitted = true
+      }
+      w.webContents.on('current-render-view-deleted', renderViewDeletedHandler)
+      w.webContents.on('did-finish-load', (e) => {
+        w.webContents.removeListener('current-render-view-deleted', renderViewDeletedHandler)
+        w.close()
+      })
+      w.loadURL(`${server.url}/redirect-cross-site`)
     })
 
-    it('supports calling preventDefault on will-prevent-unload events', (done) => {
-      ipcRenderer.send('prevent-next-will-prevent-unload', w.webContents.id)
-      w.once('closed', () => done())
-      w.loadURL('file://' + path.join(fixtures, 'api', 'close-beforeunload-false.html'))
+    it('emits current-render-view-deleted if the current RVHs are deleted', (done) => {
+      let currentRenderViewDeletedEmitted = false
+      w.webContents.once('destroyed', () => {
+        expect(currentRenderViewDeletedEmitted).to.be.true('current-render-view-deleted wasn\'t emitted')
+        done()
+      })
+      w.webContents.on('current-render-view-deleted', () => {
+        currentRenderViewDeletedEmitted = true
+      })
+      w.webContents.on('did-finish-load', (e) => {
+        w.close()
+      })
+      w.loadURL(`${server.url}/redirect-cross-site`)
+    })
+
+    it('emits render-view-deleted if any RVHs are deleted', (done) => {
+      let rvhDeletedCount = 0
+      w.webContents.once('destroyed', () => {
+        const expectedRenderViewDeletedEventCount = 3 // 1 speculative upon redirection + 2 upon window close.
+        expect(rvhDeletedCount).to.equal(expectedRenderViewDeletedEventCount, 'render-view-deleted wasn\'t emitted the expected nr. of times')
+        done()
+      })
+      w.webContents.on('render-view-deleted', () => {
+        rvhDeletedCount++
+      })
+      w.webContents.on('did-finish-load', (e) => {
+        w.close()
+      })
+      w.loadURL(`${server.url}/redirect-cross-site`)
     })
   })
 
   describe('setIgnoreMenuShortcuts(ignore)', () => {
     it('does not throw', () => {
-      assert.equal(w.webContents.setIgnoreMenuShortcuts(true), undefined)
-      assert.equal(w.webContents.setIgnoreMenuShortcuts(false), undefined)
+      expect(() => {
+        w.webContents.setIgnoreMenuShortcuts(true)
+        w.webContents.setIgnoreMenuShortcuts(false)
+      }).to.not.throw()
+    })
+  })
+
+  describe('create()', () => {
+    it('does not crash on exit', async () => {
+      const appPath = path.join(__dirname, 'fixtures', 'api', 'leak-exit-webcontents.js')
+      const electronPath = remote.getGlobal('process').execPath
+      const appProcess = ChildProcess.spawn(electronPath, [appPath])
+      const [code] = await emittedOnce(appProcess, 'close')
+      expect(code).to.equal(0)
     })
   })
 
@@ -692,7 +211,7 @@ describe('webContents module', () => {
         }
       }
 
-      let gen = genNavigationEvent()
+      const gen = genNavigationEvent()
       ipcRenderer.on(responseEvent, () => {
         if (!gen.next().value) done()
       })
@@ -706,14 +225,14 @@ describe('webContents module', () => {
       w.webContents.on('did-change-theme-color', (e, color) => {
         if (count === 0) {
           count += 1
-          assert.equal(color, '#FFEEDD')
-          w.loadURL(`file://${path.join(__dirname, 'fixtures', 'pages', 'base-page.html')}`)
+          expect(color).to.equal('#FFEEDD')
+          w.loadFile(path.join(fixtures, 'pages', 'base-page.html'))
         } else if (count === 1) {
-          assert.equal(color, null)
+          expect(color).to.be.null()
           done()
         }
       })
-      w.loadURL(`file://${path.join(__dirname, 'fixtures', 'pages', 'theme-color.html')}`)
+      w.loadFile(path.join(fixtures, 'pages', 'theme-color.html'))
     })
   })
 
@@ -725,7 +244,35 @@ describe('webContents module', () => {
           done()
         }
       })
-      w.loadURL(`file://${fixtures}/pages/a.html`)
+      w.loadFile(path.join(fixtures, 'pages', 'a.html'))
+    })
+  })
+
+  describe('ipc-message event', () => {
+    it('emits when the renderer process sends an asynchronous message', async () => {
+      const webContents = remote.getCurrentWebContents()
+      const promise = emittedOnce(webContents, 'ipc-message')
+
+      ipcRenderer.send('message', 'Hello World!')
+
+      const [, channel, message] = await promise
+      expect(channel).to.equal('message')
+      expect(message).to.equal('Hello World!')
+    })
+  })
+
+  describe('ipc-message-sync event', () => {
+    it('emits when the renderer process sends a synchronous message', async () => {
+      const webContents = remote.getCurrentWebContents()
+      const promise = emittedOnce(webContents, 'ipc-message-sync')
+
+      ipcRenderer.send('handle-next-ipc-message-sync', 'foobar')
+      const result = ipcRenderer.sendSync('message', 'Hello World!')
+
+      const [, channel, message] = await promise
+      expect(channel).to.equal('message')
+      expect(message).to.equal('Hello World!')
+      expect(result).to.equal('foobar')
     })
   })
 
@@ -733,7 +280,7 @@ describe('webContents module', () => {
     it('propagates referrer information to new target=_blank windows', (done) => {
       const server = http.createServer((req, res) => {
         if (req.url === '/should_have_referrer') {
-          assert.equal(req.headers.referer, 'http://127.0.0.1:' + server.address().port + '/')
+          expect(req.headers.referer).to.equal(`http://127.0.0.1:${server.address().port}/`)
           return done()
         }
         res.end('<a id="a" href="/should_have_referrer" target="_blank">link</a>')
@@ -742,8 +289,8 @@ describe('webContents module', () => {
         const url = 'http://127.0.0.1:' + server.address().port + '/'
         w.webContents.once('did-finish-load', () => {
           w.webContents.once('new-window', (event, newUrl, frameName, disposition, options, features, referrer) => {
-            assert.equal(referrer.url, url)
-            assert.equal(referrer.policy, 'no-referrer-when-downgrade')
+            expect(referrer.url).to.equal(url)
+            expect(referrer.policy).to.equal('no-referrer-when-downgrade')
           })
           w.webContents.executeJavaScript('a.click()')
         })
@@ -756,7 +303,7 @@ describe('webContents module', () => {
     xit('propagates referrer information to windows opened with window.open', (done) => {
       const server = http.createServer((req, res) => {
         if (req.url === '/should_have_referrer') {
-          assert.equal(req.headers.referer, 'http://127.0.0.1:' + server.address().port + '/')
+          expect(req.headers.referer).to.equal(`http://127.0.0.1:${server.address().port}/`)
           return done()
         }
         res.end('')
@@ -765,8 +312,8 @@ describe('webContents module', () => {
         const url = 'http://127.0.0.1:' + server.address().port + '/'
         w.webContents.once('did-finish-load', () => {
           w.webContents.once('new-window', (event, newUrl, frameName, disposition, options, features, referrer) => {
-            assert.equal(referrer.url, url)
-            assert.equal(referrer.policy, 'no-referrer-when-downgrade')
+            expect(referrer.url).to.equal(url)
+            expect(referrer.policy).to.equal('no-referrer-when-downgrade')
           })
           w.webContents.executeJavaScript('window.open(location.href + "should_have_referrer")')
         })
@@ -776,7 +323,7 @@ describe('webContents module', () => {
   })
 
   describe('webframe messages in sandboxed contents', () => {
-    it('responds to executeJavaScript', (done) => {
+    it('responds to executeJavaScript', async () => {
       w.destroy()
       w = new BrowserWindow({
         show: false,
@@ -784,13 +331,219 @@ describe('webContents module', () => {
           sandbox: true
         }
       })
-      w.webContents.once('did-finish-load', () => {
-        w.webContents.executeJavaScript('37 + 5', (result) => {
-          assert.equal(result, 42)
-          done()
+      await w.loadURL('about:blank')
+      const result = await w.webContents.executeJavaScript('37 + 5')
+      expect(result).to.equal(42)
+    })
+  })
+
+  describe('preload-error event', () => {
+    const generateSpecs = (description, sandbox) => {
+      describe(description, () => {
+        it('is triggered when unhandled exception is thrown', async () => {
+          const preload = path.join(fixtures, 'module', 'preload-error-exception.js')
+
+          w.destroy()
+          w = new BrowserWindow({
+            show: false,
+            webPreferences: {
+              sandbox,
+              preload
+            }
+          })
+
+          const promise = emittedOnce(w.webContents, 'preload-error')
+          w.loadURL('about:blank')
+
+          const [, preloadPath, error] = await promise
+          expect(preloadPath).to.equal(preload)
+          expect(error.message).to.equal('Hello World!')
+        })
+
+        it('is triggered on syntax errors', async () => {
+          const preload = path.join(fixtures, 'module', 'preload-error-syntax.js')
+
+          w.destroy()
+          w = new BrowserWindow({
+            show: false,
+            webPreferences: {
+              sandbox,
+              preload
+            }
+          })
+
+          const promise = emittedOnce(w.webContents, 'preload-error')
+          w.loadURL('about:blank')
+
+          const [, preloadPath, error] = await promise
+          expect(preloadPath).to.equal(preload)
+          expect(error.message).to.equal('foobar is not defined')
+        })
+
+        it('is triggered when preload script loading fails', async () => {
+          const preload = path.join(fixtures, 'module', 'preload-invalid.js')
+
+          w.destroy()
+          w = new BrowserWindow({
+            show: false,
+            webPreferences: {
+              sandbox,
+              preload
+            }
+          })
+
+          const promise = emittedOnce(w.webContents, 'preload-error')
+          w.loadURL('about:blank')
+
+          const [, preloadPath, error] = await promise
+          expect(preloadPath).to.equal(preload)
+          expect(error.message).to.contain('preload-invalid.js')
         })
       })
-      w.loadURL('about:blank')
+    }
+
+    generateSpecs('without sandbox', false)
+    generateSpecs('with sandbox', true)
+  })
+
+  describe('takeHeapSnapshot()', () => {
+    it('works with sandboxed renderers', async () => {
+      w.destroy()
+      w = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          sandbox: true
+        }
+      })
+
+      await w.loadURL('about:blank')
+
+      const filePath = path.join(remote.app.getPath('temp'), 'test.heapsnapshot')
+
+      const cleanup = () => {
+        try {
+          fs.unlinkSync(filePath)
+        } catch (e) {
+          // ignore error
+        }
+      }
+
+      try {
+        await w.webContents.takeHeapSnapshot(filePath)
+        const stats = fs.statSync(filePath)
+        expect(stats.size).not.to.be.equal(0)
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('fails with invalid file path', async () => {
+      w.destroy()
+      w = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          sandbox: true
+        }
+      })
+
+      await w.loadURL('about:blank')
+
+      const promise = w.webContents.takeHeapSnapshot('')
+      return expect(promise).to.be.eventually.rejectedWith(Error, 'takeHeapSnapshot failed')
+    })
+  })
+
+  describe('setBackgroundThrottling()', () => {
+    it('does not crash when allowing', (done) => {
+      w.webContents.setBackgroundThrottling(true)
+      done()
+    })
+
+    it('does not crash when disallowing', (done) => {
+      w.destroy()
+      w = new BrowserWindow({
+        show: false,
+        width: 400,
+        height: 400,
+        webPreferences: {
+          backgroundThrottling: true
+        }
+      })
+
+      w.webContents.setBackgroundThrottling(false)
+      done()
+    })
+
+    it('does not crash when called via BrowserWindow', (done) => {
+      w.setBackgroundThrottling(true)
+      done()
+    })
+  })
+
+  describe('getPrinterList()', () => {
+    before(function () {
+      if (!features.isPrintingEnabled()) {
+        return closeWindow(w).then(() => {
+          w = null
+          this.skip()
+        })
+      }
+    })
+
+    it('can get printer list', async () => {
+      w.destroy()
+      w = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          sandbox: true
+        }
+      })
+      await w.loadURL('data:text/html,%3Ch1%3EHello%2C%20World!%3C%2Fh1%3E')
+      const printers = w.webContents.getPrinters()
+      expect(printers).to.be.an('array')
+    })
+  })
+
+  describe('printToPDF()', () => {
+    before(function () {
+      if (!features.isPrintingEnabled()) {
+        return closeWindow(w).then(() => {
+          w = null
+          this.skip()
+        })
+      }
+    })
+
+    it('can print to PDF', async () => {
+      w.destroy()
+      w = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          sandbox: true
+        }
+      })
+      await w.loadURL('data:text/html,%3Ch1%3EHello%2C%20World!%3C%2Fh1%3E')
+      const data = await w.webContents.printToPDF({})
+      expect(data).to.be.an.instanceof(Buffer).that.is.not.empty()
+    })
+  })
+
+  describe('PictureInPicture video', () => {
+    it('works as expected', (done) => {
+      w.destroy()
+      w = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          sandbox: true
+        }
+      })
+      w.webContents.once('did-finish-load', async () => {
+        const result = await w.webContents.executeJavaScript(
+          `runTest(${features.isPictureInPictureEnabled()})`, true)
+        expect(result).to.be.true()
+        done()
+      })
+      w.loadFile(path.join(fixtures, 'api', 'picture-in-picture.html'))
     })
   })
 })

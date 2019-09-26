@@ -7,7 +7,7 @@ your app's main script before the [ready][ready] event of the [app][app] module
 is emitted:
 
 ```javascript
-const {app} = require('electron')
+const { app } = require('electron')
 app.commandLine.appendSwitch('remote-debugging-port', '8315')
 app.commandLine.appendSwitch('host-rules', 'MAP * 127.0.0.1')
 
@@ -46,21 +46,22 @@ Forces the maximum disk space to be used by the disk cache, in bytes.
 
 ## --js-flags=`flags`
 
-Specifies the flags passed to the Node JS engine. It has to be passed when starting
+Specifies the flags passed to the Node.js engine. It has to be passed when starting
 Electron if you want to enable the `flags` in the main process.
 
 ```sh
 $ electron --js-flags="--harmony_proxies --harmony_collections" your-app
 ```
 
-See the [Node documentation][node-cli] or run `node --help` in your terminal for a list of available flags. Additionally, run `node --v8-options` to see a list of flags that specifically refer to Node's V8 JavaScript engine.
+See the [Node.js documentation][node-cli] or run `node --help` in your terminal for a list of available flags. Additionally, run `node --v8-options` to see a list of flags that specifically refer to Node.js's V8 JavaScript engine.
 
 ## --proxy-server=`address:port`
 
 Use a specified proxy server, which overrides the system setting. This switch
 only affects requests with HTTP protocol, including HTTPS and WebSocket
 requests. It is also noteworthy that not all proxy servers support HTTPS and
-WebSocket requests.
+WebSocket requests. The proxy URL does not support username and password
+authentication [per Chromium issue](https://bugs.chromium.org/p/chromium/issues/detail?id=615947).
 
 ## --proxy-bypass-list=`hosts`
 
@@ -71,7 +72,7 @@ list of hosts. This flag has an effect only if used in tandem with
 For example:
 
 ```javascript
-const {app} = require('electron')
+const { app } = require('electron')
 app.commandLine.appendSwitch('proxy-bypass-list', '<local>;*.google.com;*foo.com;1.2.3.4:5678')
 ```
 
@@ -121,12 +122,12 @@ For example:
 ```
 
 then any `url` ending with `example.com`, `foobar.com`, `baz` will be considered
-for integrated authentication. Without `*` prefix the url has to match exactly.
+for integrated authentication. Without `*` prefix the URL has to match exactly.
 
 ## --auth-negotiate-delegate-whitelist=`url`
 
 A comma-separated list of servers for which delegation of user credentials is required.
-Without `*` prefix the url has to match exactly.
+Without `*` prefix the URL has to match exactly.
 
 ## --ignore-certificate-errors
 
@@ -179,6 +180,11 @@ whole pathname and not only the module. E.g. `*/foo/bar/*=2` would change the
 logging level for all code in the source files under a `foo/bar` directory.
 
 This switch only works when `--enable-logging` is also passed.
+
+## --no-sandbox
+
+Disables Chromium sandbox, which is now enabled by default.
+Should only be used for testing.
 
 [app]: app.md
 [append-switch]: app.md#appcommandlineappendswitchswitch-value

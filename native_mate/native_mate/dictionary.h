@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE.chromium file.
 
-#ifndef NATIVE_MATE_DICTIONARY_H_
-#define NATIVE_MATE_DICTIONARY_H_
+#ifndef NATIVE_MATE_NATIVE_MATE_DICTIONARY_H_
+#define NATIVE_MATE_NATIVE_MATE_DICTIONARY_H_
 
 #include "native_mate/converter.h"
-#include "native_mate/object_template_builder.h"
+#include "native_mate/object_template_builder_deprecated.h"
 
 namespace mate {
 
@@ -41,7 +41,7 @@ class Dictionary {
   static Dictionary CreateEmpty(v8::Isolate* isolate);
 
   template <typename T>
-  bool Get(const base::StringPiece& key, T* out) const {
+  bool Get(base::StringPiece key, T* out) const {
     // Check for existence before getting, otherwise this method will always
     // returns true when T == v8::Local<v8::Value>.
     v8::Local<v8::Context> context = isolate_->GetCurrentContext();
@@ -56,20 +56,7 @@ class Dictionary {
   }
 
   template <typename T>
-  bool GetHidden(const base::StringPiece& key, T* out) const {
-    v8::Local<v8::Context> context = isolate_->GetCurrentContext();
-    v8::Local<v8::Private> privateKey =
-        v8::Private::ForApi(isolate_, StringToV8(isolate_, key));
-    v8::Local<v8::Value> value;
-    v8::Maybe<bool> result = GetHandle()->HasPrivate(context, privateKey);
-    if (internal::IsTrue(result) &&
-        GetHandle()->GetPrivate(context, privateKey).ToLocal(&value))
-      return ConvertFromV8(isolate_, value, out);
-    return false;
-  }
-
-  template <typename T>
-  bool Set(const base::StringPiece& key, const T& val) {
+  bool Set(base::StringPiece key, const T& val) {
     v8::Local<v8::Value> v8_value;
     if (!TryConvertToV8(isolate_, val, &v8_value))
       return false;
@@ -79,20 +66,7 @@ class Dictionary {
   }
 
   template <typename T>
-  bool SetHidden(const base::StringPiece& key, T val) {
-    v8::Local<v8::Value> v8_value;
-    if (!TryConvertToV8(isolate_, val, &v8_value))
-      return false;
-    v8::Local<v8::Context> context = isolate_->GetCurrentContext();
-    v8::Local<v8::Private> privateKey =
-        v8::Private::ForApi(isolate_, StringToV8(isolate_, key));
-    v8::Maybe<bool> result =
-        GetHandle()->SetPrivate(context, privateKey, v8_value);
-    return !result.IsNothing() && result.FromJust();
-  }
-
-  template <typename T>
-  bool SetReadOnly(const base::StringPiece& key, T val) {
+  bool SetReadOnly(base::StringPiece key, T val) {
     v8::Local<v8::Value> v8_value;
     if (!TryConvertToV8(isolate_, val, &v8_value))
       return false;
@@ -103,13 +77,16 @@ class Dictionary {
   }
 
   template <typename T>
-  bool SetMethod(const base::StringPiece& key, const T& callback) {
-    return GetHandle()->Set(
-        StringToV8(isolate_, key),
-        CallbackTraits<T>::CreateTemplate(isolate_, callback)->GetFunction());
+  bool SetMethod(base::StringPiece key, const T& callback) {
+    return GetHandle()
+        ->Set(isolate_->GetCurrentContext(), StringToV8(isolate_, key),
+              CallbackTraits<T>::CreateTemplate(isolate_, callback)
+                  ->GetFunction(isolate_->GetCurrentContext())
+                  .ToLocalChecked())
+        .ToChecked();
   }
 
-  bool Delete(const base::StringPiece& key) {
+  bool Delete(base::StringPiece key) {
     v8::Maybe<bool> result = GetHandle()->Delete(isolate_->GetCurrentContext(),
                                                  StringToV8(isolate_, key));
     return !result.IsNothing() && result.FromJust();
@@ -122,7 +99,7 @@ class Dictionary {
   v8::Isolate* isolate() const { return isolate_; }
 
  protected:
-  v8::Isolate* isolate_;
+  v8::Isolate* isolate_ = nullptr;
 
  private:
   v8::Local<v8::Object> object_;
@@ -138,4 +115,4 @@ struct Converter<Dictionary> {
 
 }  // namespace mate
 
-#endif  // NATIVE_MATE_DICTIONARY_H_
+#endif  // NATIVE_MATE_NATIVE_MATE_DICTIONARY_H_

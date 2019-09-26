@@ -6,6 +6,8 @@ Process: [Main](../glossary.md#main-process)
 
 **See also: [A detailed guide about how to implement updates in your application](../tutorial/updates.md).**
 
+`autoUpdater` is an [EventEmitter][event-emitter].
+
 ## Platform Notices
 
 Currently, only macOS and Windows are supported. There is no built-in support
@@ -84,6 +86,9 @@ Emitted when an update has been downloaded.
 
 On Windows only `releaseName` is available.
 
+**Note:** It is not strictly necessary to handle this event. A successfully
+downloaded update will still be applied the next time the application starts.
+
 ### Event: 'before-quit-for-update'
 
 This event is emitted after a user calls `quitAndInstall()`.
@@ -98,7 +103,7 @@ The `autoUpdater` object has the following methods:
 
 * `options` Object
   * `url` String
-  * `headers` Object (optional) _macOS_ - HTTP request headers.
+  * `headers` Record<String, String> (optional) _macOS_ - HTTP request headers.
   * `serverType` String (optional) _macOS_ - Either `json` or `default`, see the [Squirrel.Mac][squirrel-mac]
     README for more information.
 
@@ -122,9 +127,9 @@ Under the hood calling `autoUpdater.quitAndInstall()` will close all application
 windows first, and automatically call `app.quit()` after all windows have been
 closed.
 
-**Note:** If the application is quit without calling this API after the
-`update-downloaded` event has been emitted, the application will still be
-replaced by the updated one on the next run.
+**Note:** It is not strictly necessary to call this function to apply an update,
+as a successfully downloaded update will always be applied the next time the
+application starts.
 
 [squirrel-mac]: https://github.com/Squirrel/Squirrel.Mac
 [server-support]: https://github.com/Squirrel/Squirrel.Mac#server-support
@@ -133,3 +138,4 @@ replaced by the updated one on the next run.
 [installer-lib]: https://github.com/electron/windows-installer
 [electron-forge-lib]: https://github.com/electron-userland/electron-forge
 [app-user-model-id]: https://msdn.microsoft.com/en-us/library/windows/desktop/dd378459(v=vs.85).aspx
+[event-emitter]: https://nodejs.org/api/events.html#events_class_eventemitter

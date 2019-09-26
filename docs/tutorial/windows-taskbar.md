@@ -35,7 +35,7 @@ as quoted from MSDN:
 
 __Tasks of Internet Explorer:__
 
-![IE](http://i.msdn.microsoft.com/dynimg/IC420539.png)
+![IE](https://i-msdn.sec.s-msft.com/dynimg/IC420539.png)
 
 Unlike the dock menu in macOS which is a real menu, user tasks in Windows work
 like application shortcuts such that when user clicks a task, a program will be
@@ -148,7 +148,7 @@ To set the overlay icon for a window, you can use the
 [BrowserWindow.setOverlayIcon][setoverlayicon] API:
 
 ```javascript
-const {BrowserWindow} = require('electron')
+const { BrowserWindow } = require('electron')
 let win = new BrowserWindow()
 win.setOverlayIcon('path/to/overlay.png', 'Description for overlay')
 ```
@@ -167,7 +167,7 @@ To flash the BrowserWindow taskbar button, you can use the
 [BrowserWindow.flashFrame][flashframe] API:
 
 ```javascript
-const {BrowserWindow} = require('electron')
+const { BrowserWindow } = require('electron')
 let win = new BrowserWindow()
 win.once('focus', () => win.flashFrame(false))
 win.flashFrame(true)

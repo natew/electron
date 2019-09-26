@@ -17,7 +17,7 @@ Node.js application. The starting point is a `package.json` that is identical
 to that of a Node.js module. A most basic Electron app would have the following
 folder structure:
 
-```text
+```plaintext
 your-app/
 ├── package.json
 ├── main.js
@@ -105,11 +105,17 @@ using the `electron.BrowserWindow` class. A simple `main.js` file might wait
 for the application to be ready and open a window:
 
 ```javascript
-const {app, BrowserWindow} = require('electron')
+const { app, BrowserWindow } = require('electron')
 
 function createWindow () {
   // Create the browser window.
-  win = new BrowserWindow({width: 800, height: 600})
+  let win = new BrowserWindow({
+    width: 800,
+    height: 600,
+    webPreferences: {
+      nodeIntegration: true
+    }
+  })
 
   // and load the index.html of the app.
   win.loadFile('index.html')
@@ -124,7 +130,7 @@ might open developer tools, handle the window being closed, or re-create
 windows on macOS if the user clicks on the app's icon in the dock.
 
 ```javascript
-const {app, BrowserWindow} = require('electron')
+const { app, BrowserWindow } = require('electron')
 
 // Keep a global reference of the window object, if you don't, the window will
 // be closed automatically when the JavaScript object is garbage collected.
@@ -132,7 +138,13 @@ let win
 
 function createWindow () {
   // Create the browser window.
-  win = new BrowserWindow({width: 800, height: 600})
+  win = new BrowserWindow({
+    width: 800,
+    height: 600,
+    webPreferences: {
+      nodeIntegration: true
+    }
+  })
 
   // and load the index.html of the app.
   win.loadFile('index.html')
@@ -183,6 +195,8 @@ Finally the `index.html` is the web page you want to show:
   <head>
     <meta charset="UTF-8">
     <title>Hello World!</title>
+    <!-- https://electronjs.org/docs/tutorial/security#csp-meta-tag -->
+    <meta http-equiv="Content-Security-Policy" content="script-src 'self';" />
   </head>
   <body>
     <h1>Hello World!</h1>
@@ -204,7 +218,7 @@ directory.
 Clone and run the code in this tutorial by using the
 [`electron/electron-quick-start`][quick-start] repository.
 
-**Note**: Running this requires [Git](https://git-scm.com).
+**Note**: Running this requires [Git](https://git-scm.com) and [npm](https://www.npmjs.com/).
 
 ```sh
 # Clone the repository
